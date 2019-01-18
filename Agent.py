@@ -5,7 +5,7 @@ import logging
 import tensorflow as tf
 import numpy as np
 
-from keras.layers import Input, Dense, concatenate
+from keras.layers import Input, Dense, Flatten, concatenate
 from keras.models import Model, load_model
 from keras.optimizers import Adam
 from keras import backend as K
@@ -140,22 +140,16 @@ class Agent:
 
     def training_loop(self):
         # reset the environment
-        observations = self.env.reset()
-        episode_map = {}
+        observation = self.env.reset()
 
         # Mini batch which contains a single episode's data
-        ep_batches = []
-        for env_num in range(self.env.num_envs):
-            ep_batches.append({
-                'observation': [],
-                'action_vector': [],
-                'probability': [],
-                'reward': [],
-                'ep_step': 0
-            })
-            episode_map[env_num] = self.episode
-            self.episode += 1
-
+        ep_batch = {
+            'observation': [],
+            'action_vector': [],
+            'probability': [],
+            'reward': [],
+            'ep_step': 0
+        }
 
         self.train_step = 0
         # Collect a batch of samples
@@ -170,40 +164,30 @@ class Agent:
 
             # While we don't hit the buffer size with our master batch...
             while len(batch['observation']) < self.buffer_size:
-                actions = []
-                for env_num, observation in enumerate(observations):
-                    ep_batch = ep_batches[env_num]
+                # Get the action (scalar), action vector (one-hot vector),
+                # and probability distribution (vector) from the current observation
 
-                    # Get the action (scalar), action vector (one-hot vector),
-                    # and probability distribution (vector) from the current observation
+                action, action_vector, prob = self.step(observation)
 
-                    action, action_vector, prob = self.step(observation)
-                    actions.append(action)
-
-                    # Append the data to the mini batch
-                    ep_batch['observation'].append(observation)
-                    ep_batch['action_vector'].append(action_vector)
-                    ep_batch['probability'].append(prob)
-
-                next_observations, rewards, dones, infos = self.env.step(actions)
-                for env_num, (next_observation, reward, done, info) in enumerate(zip(next_observations, rewards, dones, infos)):
-                    ep_batch = ep_batches[env_num]
-                    ep_batch['reward'].append(reward)
+                next_observation, reward, done, info = self.env.step(action)
+                
+                # Append the data to the mini batch
+                ep_batch['observation'].append(observation)
+                ep_batch['action_vector'].append(action_vector)
+                ep_batch['probability'].append(prob)
+                ep_batch['reward'].append(reward)
 
                 # The current observation is now the 'next' observation
-                observations = next_observations
+                observation = next_observation
 
                 # if the episode is at a terminal state...
-                for env_num, done in enumerate(dones):
-                    if not done:
-                        continue
-                    ep_batch = ep_batches[env_num]
-
+                if done:
                     total_episode_reward = 0
                     for rew in ep_batch['reward']:
                         total_episode_reward += rew
 
-                    print('Ep: {}, Rew: {}'.format(self.episode, total_episode_reward))
+                    if (self.episode + 1) % 10 == 0:
+                        print('Ep: {}, Rew: {}'.format(self.episode, total_episode_reward))
 
                     # transform rewards based to discounted cumulative rewards
                     for j in range(len(ep_batch['reward']) - 2, -1, -1):
@@ -226,7 +210,7 @@ class Agent:
                     # reset the environment
                     # observations = self.env.reset()
 
-                    ep_batches[env_num] = {
+                    ep_batch = {
                         'observation': [],
                         'action_vector': [],
                         'probability': [],
@@ -234,13 +218,12 @@ class Agent:
                         'ep_step': -1
                     }
 
+                    observation = self.env.reset()
                     # increment the episode count
                     self.episode += 1
-                    episode_map[env_num] = self.episode
 
                 # END OF TRAIN STEP
-                for ep_batch in ep_batches:
-                    ep_batch['ep_step'] += 1
+                ep_batch['ep_step'] += 1
                 self.train_step += 1
 
             # we've filled up our master batch, so we unpack it into numpy arrays
