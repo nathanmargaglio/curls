@@ -4,280 +4,250 @@ import time
 import logging
 import tensorflow as tf
 import numpy as np
+
+from keras.layers import Input, Dense, concatenate
+from keras.models import Model, load_model
+from keras.optimizers import Adam
+from keras import backend as K
+
 tf.logging.set_verbosity(tf.logging.ERROR)
-    
+
 class Agent:
-    def __init__(self, name='agent', version=0, path='./runs/', subagents=[], tmp_run=False,
-                set_subagent_data=True, save_run=True, versioning=True, verbose=0, *args, **kargs): 
-        # Meta Data
-        self.kargs = kargs
-        self.tmp_run = tmp_run
-        self.tmp_path = "{}tmp-0/".format(path)
-        self.set_meta_data(name, version, path, subagents, set_subagent_data)
+    def __init__(self, env, epsilon=0.2, gamma=0.99, entropy_loss=1e-3, actor_lr=0.001, critic_lr=0.005,
+                hidden_size=128, epochs=10, batch_size=64, buffer_size=256, *args, **kwargs):
+        self.env = env
+        self.action_space = env.action_space
+        self.observation_space = env.observation_space
+
+        # Set hyperparameters
+        self.epsilon = epsilon
+        self.gamma = gamma
+        self.entropy_loss = entropy_loss
+        self.actor_lr = actor_lr
+        self.critic_lr = critic_lr
+        self.hidden_size = hidden_size
+        self.epochs = epochs
+        self.batch_size = batch_size
+        self.buffer_size = buffer_size
         self.models = {}
-        self.loggers = {}
-        self.handlers = {}
-        self.jobs = {}
-        self.sessions = {}
-        
-        self.log_formatter = logging.Formatter("%(asctime)s %(message)s")
-        self.verbose = verbose
-        self.save_run = save_run
-        self.versioning = versioning
-        self.subagent_versioning = self.versioning
-        
-        self.tf_config = tf.ConfigProto()
-        self.tf_config.gpu_options.allow_growth=True
-        
-    def __enter__(self):
-        return self
-    
-    def __exit__(self, exc_type, exc_value, traceback):
-        print('Cleaning Up:', self)
-        self.clean_up()
-        
-    def clean_up(self):
-        self.close_job()
-        self.close_log()
-        del self.models
-        self.models = {}
-    
-    def set_meta_data(self, name=None, version=None, path=None, subagents=None, set_subagent_data=True):
-        if path is not None:
-            if path[-1] != '/':
-                path.append('/')
-            self.path = path
 
-        if name is not None:
-            self.name = name
-
-        if version is not None:
-            self.version = version
-            
-        if subagents is not None:
-            self.subagents = subagents
-            
-        if self.tmp_run:
-            self.name = 'tmp'
-            self.version = 0
-            
-        self.run_path = "{}{}-{}/".format(self.path, self.name, self.version)
-        
-        if set_subagent_data:
-            for i, agent in enumerate(self.subagents):
-                agent.set_meta_data(
-                    name='subagent',
-                    version=i,
-                    path=self.run_path + 'subagents/'
-                )
-
-        self.model_path = self.run_path + 'models/'
-        self.data_path = self.run_path + 'data/'
-
-    def create_new_run(self):
-        # Creates a new run
-        # i.e., gives the agent a unique name (through versioning)
-        # and creates a new directory for the training run
-        if self.versioning is True and not self.tmp_run:
-            extra_version = 0
-            while True:
-                self.version = len(self.get_previous_run_versions()) + extra_version
-                proposed_run_path = "{}{}-{}/".format(self.path, self.name, self.version)
-                if os.path.isdir(proposed_run_path):
-                    extra_version += 1
-                else:
-                    break
-                if extra_version > 999:
-                    raise StopIteration('Exceeded 999 runs of the name {}'.format(self.name))
-
-        # Reset the agent's meta data
-        self.set_meta_data()
-
-        if self.tmp_run:
-            try:
-                shutil.rmtree(self.tmp_path)
-            except OSError as e:
-                print("Error: {} - {}.".format(e.filename, e.strerror))
-                
-        # Make sure our paths exist
-        os.makedirs(self.path, exist_ok=True)
-        os.makedirs(self.run_path, exist_ok=True)
-        os.makedirs(self.model_path, exist_ok=True)
-        os.makedirs(self.data_path, exist_ok=True)
-       
-    def training_loop(self):
-        pass
-       
-    def pretraining_step(self):
-        pass
-    
     def build_models(self):
-        pass
+        # Build Actor and Critic models
+        self.models['actor'] = self.build_actor_model()
+        self.models['critic'] = self.build_critic_model()
+        self.DUMMY_ACTION, self.DUMMY_VALUE = np.zeros((1,self.action_space.n)), np.zeros((1,1))
 
-    def _training_job(self):
+    def proximal_policy_optimization_loss(self, advantage, old_pred, debug=True):
+
+        # Defines the PPO loss to be used during actor optimization
+        def loss(y_true, y_pred):
+            adv = K.sum(advantage, axis=1)
+            prob = y_true * y_pred
+            old_prob = y_true * old_pred
+
+            r = K.sum(prob/(old_prob + 1e-10), axis=1)
+            clipped = K.clip(r, min_value=1-self.epsilon, max_value=1+self.epsilon)
+            minimum = K.minimum(r * adv, clipped * adv)
+
+            entropy_bonus = self.entropy_loss * (prob * K.log(prob + 1e-10))
+            entropy_bonus = K.sum(entropy_bonus, axis=1)
+
+            result = -K.mean(minimum + entropy_bonus)
+            return result
+        return loss
+
+    def build_actor_model(self):
+        state_inputs = Input(shape=self.observation_space.shape)
+        advantage = Input(shape=(1,))
+        old_pred = Input(shape=(self.action_space.n,))
+
+        # hidden layers
+        x = Dense(self.hidden_size, activation='relu')(state_inputs)
+        x = Dense(self.hidden_size, activation='relu')(x)
+
+        # the output is a probability distribution over the actions
+        out_actions = Dense(self.action_space.n, activation='softmax')(x)
+
+        model = Model(inputs=[state_inputs, advantage, old_pred],
+                      outputs=[out_actions])
+
+        # compile the model using our custom loss function
+        model.compile(optimizer=Adam(lr=self.actor_lr),
+                      loss=[self.proximal_policy_optimization_loss(
+                          advantage=advantage,
+                          old_pred=old_pred
+                      )])
+        return model
+
+    def build_critic_model(self):
+        # critic recieves the observation as input
+        state_inputs = Input(shape=self.observation_space.shape)
+
+        # hidden layers
+        x = Dense(self.hidden_size, activation='relu')(state_inputs)
+        x = Dense(self.hidden_size, activation='relu')(x)
+
+        # we predict the value of the current observation
+        predictions = Dense(1, activation='linear')(x)
+
+        model = Model(inputs=state_inputs, outputs=predictions)
+        model.compile(optimizer=Adam(lr=self.critic_lr),
+                      loss='mse')
+        return model
+
+    def step(self, observation):
+        # Predict the probability destribution of the actions as a vactor
+        prob = self.models['actor'].predict([np.array([observation]),
+                                   self.DUMMY_VALUE,
+                                   self.DUMMY_ACTION])
+        prob = prob.flatten()
+
+        # Sample an action as a scaler
+        action = np.random.choice(self.action_space.n, 1, p=prob)[0]
+
+        # Vectorize the action as a one-hot encoding
+        action_vector = np.zeros(self.action_space.n)
+        action_vector[action] = 1
+
+        return action, action_vector, prob
+
+    def train_on_batch(self, observations, actions, probabilities, rewards):
+        # limit our data to the buffer_size
+        obs = observations[:self.buffer_size]
+        acts = actions[:self.buffer_size]
+        probs = probabilities[:self.buffer_size]
+        rews = rewards[:self.buffer_size]
+        old_probs = probs
+
+        # Calculate advantages
+        values = self.models['critic'].predict(obs).reshape((self.buffer_size, 1))
+        advs = rews - values
+
+        # Train the actor and critic on the batch data
+        self.models['actor'].fit([obs, advs, old_probs], [acts],
+                       batch_size=self.batch_size, shuffle=True,
+                       epochs=self.epochs, verbose=False)
+        self.models['critic'].fit([obs], [advs],
+                       batch_size=self.batch_size, shuffle=True,
+                        epochs=self.epochs, verbose=False)
+
+
+    def train(self, episodes=100):
         self.episode = 0
-        self.train_step = 0
-        self.episode_step = 0
-        self.episode_rewards = []
-  
-        for i, agent in enumerate(self.subagents):
-            agent.create_new_run(self.subagent_versioning)
-            
-        sess = tf.Session(config=self.tf_config)
-        self.start_time = time.time()
-        try:
-            self.create_new_run()
-
-            self.setup_logger('agent', verbose=self.verbose > 0, use_formatter=True)
-            self.log('Run Created: {}'.format(self.run_path))
-            self.log('Agent logs created.')
-
-            self.setup_logger('agent_debug', verbose=self.verbose > 1, use_formatter=True)
-            self.logd('Debug logs created.')
-
-            self.log('Running Pretraining Step.')
-            self.pretraining_step()
-            self.log('Building Models.')
-            self.build_models()
-            self.log('Beginning Training Loop.')
-            self.training_loop()
-            sess.close()
-            self.end_time = time.time()
-            self.log('Training Complete! {:.3f} sec'.format(self.end_time - self.start_time))
-        except Exception as e:
-            sess.close()
-            self.log('Error!')
-            self.log("{}".format(e))
-            raise e
-        self.clean_up()
-        
-    def run(self, episodes, multiprocess=True):
         self.max_episodes = episodes
-        self._training_job()
-      
-    def setup_logger(self, tag, sub_path=None, verbose=False, level=logging.INFO,
-                     close_previous_version=True, use_formatter=False):
-        
-        if close_previous_version and type(sub_path) is int:
-            previous_sub_path = str(sub_path - 1)
-            if previous_sub_path[-1] != '/':
-                previous_sub_path += '/'
-            previous_sub_path = '{}{}'.format(previous_sub_path, tag)
+        self.build_models()
+        self.training_loop()
 
-            self.close_log(previous_sub_path)
-                
-        if sub_path is None:
-            sub_path = ''
-        else:
-            sub_path = str(sub_path)
-            if len(sub_path) < 1 or sub_path[-1] != '/':
-                sub_path += '/'
-                
-        logger_path = '{}{}'.format(sub_path, tag)
-        logger_name = '{}-{}_{}'.format(self.name, self.version, logger_path)
-        os.makedirs(self.data_path + sub_path, exist_ok=True)
-        handler = logging.FileHandler(self.data_path + "{}.txt".format(logger_path))
-        logger = logging.getLogger(logger_name)
-        if use_formatter:
-            handler.setFormatter(self.log_formatter)
-        logger.setLevel(level)
-        logger.addHandler(handler)
-        
-        if verbose:
-            console_handler = logging.StreamHandler()
-            if use_formatter:
-                console_handler.setFormatter(self.log_formatter)   
-            logger.addHandler(console_handler)
-            
-        self.handlers[logger_path] = handler
-        self.loggers[logger_path] = logger
-        
-        return self.loggers[logger_path]
-    
-    def fetch_or_create_logger(self, tag, sub_path=None):
-        passed_sub_path = sub_path
-        if sub_path is None:
-            sub_path = ''
-        else:
-            sub_path = str(sub_path)
-            if sub_path[-1] != '/':
-                sub_path += '/'
-                
-        logger_path = '{}{}'.format(sub_path, tag)
-   
-        if logger_path in self.loggers.keys():
-            return self.loggers[logger_path]
-        else:
-            return self.setup_logger(tag, passed_sub_path)
-        
-    def close_log(self, name=None):
-        if name is None:
-            names = list(self.loggers.keys())[:]
-            for n in names:
-                self.loggers.pop(n)
-                self.handlers.pop(n).close()
-        else:
-            if name in self.loggers.keys():
-                self.loggers.pop(name)
-                self.handlers.pop(name).close()
-                
-    def close_log_by_tag(self, tag, sub_path=None):
-        passed_sub_path = sub_path
-        if sub_path is None:
-            sub_path = ''
-        else:
-            sub_path = str(sub_path)
-            if sub_path[-1] != '/':
-                sub_path += '/'
-                
-        logger_path = '{}{}'.format(sub_path, tag)
-        self.close_log(logger_path)
- 
-    def close_job(self, name=None):
-        if name is None:
-            names = list(self.jobs.keys())[:]
-            for n in names:
-                job = self.jobs.pop(n)
-                job.terminate()
-                job.join()
-        else:
-            if name in self.jobs.keys():
-                job = self.jobs.pop(name)
-                job.terminate()
-                job.join()
-    
-    def log_scalar(self, tag, value, step, sub_path=None):
-        logger = self.fetch_or_create_logger(tag, sub_path)
-        logger.info("{},{},{}".format(step, time.time(), value))
-        
-    def log_ndarray(self, tag, array, step, sub_path=None):
-        array = np.array(array)
-        logger = self.fetch_or_create_logger(tag, sub_path)
-        shape = np.array(array.shape, dtype=float).tobytes()
-        value = array.astype(float).tobytes()
-        logger.info("{},{},{},{}".format(step, time.time(), shape, value))       
+    def training_loop(self):
+        # reset the environment
+        observations = self.env.reset()
+        episode_map = {}
 
-    def log(self, value):
-        self.loggers['agent'].info(value)
+        # Mini batch which contains a single episode's data
+        ep_batches = []
+        for env_num in range(self.env.num_envs):
+            ep_batches.append({
+                'observation': [],
+                'action_vector': [],
+                'probability': [],
+                'reward': [],
+                'ep_step': 0
+            })
+            episode_map[env_num] = self.episode
+            self.episode += 1
 
-    def logd(self, tag, value='', level=0):
-        lev_val = '-'*level + '>'
-        self.loggers['agent_debug'].info("{} {}\t{}".format(lev_val, tag, value))
-        
-    def get_previous_run_versions(self):
-        try:
-            files = os.listdir(self.path)
-            files = [f for f in files if self.name + '-' in f]
-            return files
-        except FileNotFoundError as e:
-            print("Root path {} doesn't exist.  Creating it...".format(self.path))
-            os.makedirs(self.path, exist_ok=True)
-            return []
-    
-    def save_models(self):
-        for model in self.models:
-            self.models[model].save_weights(self.model_path + '{}-{}_{}.h5'.format(self.name, self.version, model))
-            
-    def load_models(self):
-        for model in self.models:
-            self.models[model].load_weights(self.model_path + '{}-{}_{}.h5'.format(self.name, self.version, model))
+
+        self.train_step = 0
+        # Collect a batch of samples
+        while self.episode < self.max_episodes:
+            # 'Master Batch' that we add mini batches to
+            batch = {
+                'observation': [],
+                'action_vector': [],
+                'probability': [],
+                'reward': []
+            }
+
+            # While we don't hit the buffer size with our master batch...
+            while len(batch['observation']) < self.buffer_size:
+                actions = []
+                for env_num, observation in enumerate(observations):
+                    ep_batch = ep_batches[env_num]
+
+                    # Get the action (scalar), action vector (one-hot vector),
+                    # and probability distribution (vector) from the current observation
+
+                    action, action_vector, prob = self.step(observation)
+                    actions.append(action)
+
+                    # Append the data to the mini batch
+                    ep_batch['observation'].append(observation)
+                    ep_batch['action_vector'].append(action_vector)
+                    ep_batch['probability'].append(prob)
+
+                next_observations, rewards, dones, infos = self.env.step(actions)
+                for env_num, (next_observation, reward, done, info) in enumerate(zip(next_observations, rewards, dones, infos)):
+                    ep_batch = ep_batches[env_num]
+                    ep_batch['reward'].append(reward)
+
+                # The current observation is now the 'next' observation
+                observations = next_observations
+
+                # if the episode is at a terminal state...
+                for env_num, done in enumerate(dones):
+                    if not done:
+                        continue
+                    ep_batch = ep_batches[env_num]
+
+                    total_episode_reward = 0
+                    for rew in ep_batch['reward']:
+                        total_episode_reward += rew
+
+                    print('Ep: {}, Rew: {}'.format(self.episode, total_episode_reward))
+
+                    # transform rewards based to discounted cumulative rewards
+                    for j in range(len(ep_batch['reward']) - 2, -1, -1):
+                        ep_batch['reward'][j] += ep_batch['reward'][j + 1] * self.gamma
+
+                    # for each entry in the mini batch...
+                    for i in range(len(ep_batch['observation'])):
+                        # we unpack the data
+                        obs = ep_batch['observation'][i]
+                        act = ep_batch['action_vector'][i]
+                        prob = ep_batch['probability'][i]
+                        r = ep_batch['reward'][i]
+
+                        # and pack it into the master batch
+                        batch['observation'].append(obs)
+                        batch['action_vector'].append(act)
+                        batch['probability'].append(prob)
+                        batch['reward'].append([r])
+
+                    # reset the environment
+                    # observations = self.env.reset()
+
+                    ep_batches[env_num] = {
+                        'observation': [],
+                        'action_vector': [],
+                        'probability': [],
+                        'reward': [],
+                        'ep_step': -1
+                    }
+
+                    # increment the episode count
+                    self.episode += 1
+                    episode_map[env_num] = self.episode
+
+                # END OF TRAIN STEP
+                for ep_batch in ep_batches:
+                    ep_batch['ep_step'] += 1
+                self.train_step += 1
+
+            # we've filled up our master batch, so we unpack it into numpy arrays
+            _observations = np.array(batch['observation'])
+            _actions = np.array(batch['action_vector'])
+            _probabilities = np.array(batch['probability'])
+            _rewards = np.array(batch['reward'])
+
+            # train the agent on the batched data
+            self.train_on_batch(_observations, _actions, _probabilities, _rewards)

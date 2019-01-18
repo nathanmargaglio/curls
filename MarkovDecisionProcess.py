@@ -115,8 +115,8 @@ class NumpyEncoder(json.JSONEncoder):
         return json.JSONEncoder.default(self, obj)
 
 class NumpyMessage(object):
-    def __init__(self, *args):
-        self.args = args
+    def __init__(self, data):
+        self.data = data
 
     def __str__(self):
-        return json.dumps(self.args, cls=NumpyEncoder)
+        return json.dumps(self.data, cls=NumpyEncoder)
