@@ -131,7 +131,6 @@ class Agent:
                        batch_size=self.batch_size, shuffle=True,
                         epochs=self.epochs, verbose=False)
 
-
     def train(self, episodes=100):
         self.episode = 0
         self.max_episodes = episodes
