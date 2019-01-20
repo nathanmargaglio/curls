@@ -1,8 +1,89 @@
-import numpy as np
+import zmq
+import time
 import json
 import logging
 import os
 import shutil
+
+import numpy as np
+import matplotlib.pyplot as plt
+import multiprocessing as mp
+
+def start_master():
+    import tensorflow as tf
+    config = tf.ConfigProto()
+    config.gpu_options.allow_growth = True
+    tf.enable_eager_execution(config=config)
+
+    header = "master >"
+    context = zmq.Context()
+    model = Classifier(2, 1)
+    losses = []
+
+    def get_loss(model):
+        tensor = tf.convert_to_tensor(input_data, dtype=tf.float32)
+        output = model(tensor)
+        loss = -tf.reduce_mean((output_data - output)**2)
+        return np.abs(loss.numpy())
+        
+    def apply_grads(model, grads):
+        for w, g in zip(model.trainable_weights, grads):
+            w.assign_add(g)
+
+    with context.socket(zmq.REP) as socket:
+        socket.bind('tcp://127.0.0.1:5555')
+        print(header, 'listening...')
+        try:
+            count = 0
+            while True:
+                msg = json.loads(socket.recv())
+                socket.send_string(json.dumps({ "weights": model.get_weights()}, cls=NumpyEncoder))
+                apply_grads(model, msg['grads'])
+                loss = get_loss(model)
+                losses.append(loss)
+                count += 1
+                if count % 100 == 0:
+                    print("{} {:03d} {}".format(header, count, loss))
+        except KeyboardInterrupt as e:
+            print(header, 'Stopped.')
+            plt.figure(num=None, figsize=(8, 6), dpi=80, facecolor='w', edgecolor='k')
+            plt.plot(np.abs(losses))
+            plt.show()
+            
+def start_worker(input_data, output_data):
+    import tensorflow as tf
+    config = tf.ConfigProto()
+    config.gpu_options.allow_growth = True
+    tf.enable_eager_execution(config=config)
+
+    header = "- {} >".format(input_data)
+    context = zmq.Context()
+    
+    model = Classifier(2, 1)
+    losses = []
+    lr = 0.01
+    input_data = input_data
+    output_data = output_data
+    tensor = tf.convert_to_tensor(np.array([input_data]), dtype=tf.float32)
+    
+    def get_grads(model, tensor):
+        with tf.GradientTape() as tape:
+            output = model(tensor)
+            loss = -tf.reduce_mean((output_data - output)**2)
+        losses.append(loss.numpy())
+        grads = tape.gradient(loss, model.trainable_weights)
+        return [lr*g.numpy() for g in grads]
+    
+    try:
+        for i in range(100):
+            with context.socket(zmq.REQ) as socket:
+                socket.connect('tcp://127.0.0.1:5555')
+                grads = get_grads(model, tensor)
+                socket.send_string(json.dumps({ "grads": grads, "data": input_data }, cls=NumpyEncoder))
+                msg = json.loads(socket.recv())
+                model.set_weights(msg['weights'])
+    except KeyboardInterrupt as e:
+        print(header, 'Stopped.')
 
 class MarkovDecisionProcess:
     def __init__(self, name='mdp', version=0, path='mdps/',

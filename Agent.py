@@ -3,17 +3,59 @@ import shutil
 import time
 import logging
 import tensorflow as tf
+from tensorflow.python import keras
+from tensorflow.python.keras import layers
 import numpy as np
-
-from keras.layers import Input, Dense, Flatten, concatenate
-from keras.models import Model, load_model
-from keras.optimizers import Adam
-from keras import backend as K
 
 tf.logging.set_verbosity(tf.logging.ERROR)
 
+class ActorModel(keras.Model):
+    def __init__(self, state_size, action_size):
+        super(ActorModel, self).__init__()
+        self.state_size = state_size
+        self.action_size = action_size
+        self.dense1 = layers.Dense(100, activation='relu')
+        self.policy_logits = layers.Dense(action_size)
+
+    def call(self, observation):
+        observation = tf.convert_to_tensor(observation, dtype=tf.float32)
+        # Forward pass
+        x = self.dense1(observation)
+        logits = self.policy_logits(x)
+        return logits
+    
+class CriticModel(keras.Model):
+    def __init__(self, state_size, action_size):
+        super(CriticModel, self).__init__()
+        self.state_size = state_size
+        self.action_size = action_size
+        self.dense2 = layers.Dense(100, activation='relu')
+        self.values = layers.Dense(1)
+
+    def call(self, observation):
+        observation = tf.convert_to_tensor(observation, dtype=tf.float32)
+        # Forward pass
+        v1 = self.dense2(observation)
+        values = self.values(v1)
+        return values
+
+class ActorCriticModel(keras.Model):
+    def __init__(self, state_size, action_size):
+        super(ActorCriticModel, self).__init__()
+        self.state_size = state_size
+        self.action_size = action_size
+        self.actor = ActorModel(state_size, action_size)
+        self.critic = CriticModel(state_size, action_size)
+
+    def call(self, observation):
+        observation = tf.convert_to_tensor(observation, dtype=tf.float32)
+        # Forward pass
+        logits = self.actor(observation)
+        values = self.critic(observation)
+        return logits, values
+
 class Agent:
-    def __init__(self, env, epsilon=0.2, gamma=0.99, entropy_loss=1e-3, actor_lr=0.001, critic_lr=0.005,
+    def __init__(self, env, epsilon=0.2, gamma=0.99, entropy_loss=1e-3, actor_lr=0.01, critic_lr=0.001,
                 hidden_size=128, epochs=10, batch_size=64, buffer_size=256, *args, **kwargs):
         self.env = env
         self.action_space = env.action_space
@@ -29,78 +71,39 @@ class Agent:
         self.epochs = epochs
         self.batch_size = batch_size
         self.buffer_size = buffer_size
-        self.models = {}
+        self.model = ActorCriticModel(self.observation_space.shape, self.action_space.n)
 
-    def build_models(self):
-        # Build Actor and Critic models
-        self.models['actor'] = self.build_actor_model()
-        self.models['critic'] = self.build_critic_model()
-        self.DUMMY_ACTION, self.DUMMY_VALUE = np.zeros((1,self.action_space.n)), np.zeros((1,1))
-
-    def proximal_policy_optimization_loss(self, advantage, old_pred, debug=True):
+    def proximal_policy_optimization_loss(self, advantage, old_pred):
 
         # Defines the PPO loss to be used during actor optimization
         def loss(y_true, y_pred):
-            adv = K.sum(advantage, axis=1)
+            adv = tf.reduce_sum(advantage, axis=1)
+            adv = tf.cast(adv, tf.float32)
             prob = y_true * y_pred
             old_prob = y_true * old_pred
 
-            r = K.sum(prob/(old_prob + 1e-10), axis=1)
-            clipped = K.clip(r, min_value=1-self.epsilon, max_value=1+self.epsilon)
-            minimum = K.minimum(r * adv, clipped * adv)
+            r = tf.reduce_sum(prob/(old_prob + 1e-10), axis=1)
+            r = tf.cast(r, tf.float32)
+            
+            clipped = tf.clip_by_value(
+                r,
+                clip_value_min = 1 - self.epsilon,
+                clip_value_max = 1 + self.epsilon
+            )
+            minimum = tf.minimum(r * adv, clipped * adv)
 
-            entropy_bonus = self.entropy_loss * (prob * K.log(prob + 1e-10))
-            entropy_bonus = K.sum(entropy_bonus, axis=1)
-
-            result = -K.mean(minimum + entropy_bonus)
+            entropy_bonus = self.entropy_loss * (prob * tf.log(prob + 1e-10))
+            entropy_bonus = tf.reduce_sum(entropy_bonus, axis=1)
+            entropy_bonus = tf.cast(entropy_bonus, tf.float32)
+            
+            result = - tf.reduce_mean(minimum + entropy_bonus)
             return result
         return loss
 
-    def build_actor_model(self):
-        state_inputs = Input(shape=self.observation_space.shape)
-        advantage = Input(shape=(1,))
-        old_pred = Input(shape=(self.action_space.n,))
-
-        # hidden layers
-        x = Dense(self.hidden_size, activation='relu')(state_inputs)
-        x = Dense(self.hidden_size, activation='relu')(x)
-
-        # the output is a probability distribution over the actions
-        out_actions = Dense(self.action_space.n, activation='softmax')(x)
-
-        model = Model(inputs=[state_inputs, advantage, old_pred],
-                      outputs=[out_actions])
-
-        # compile the model using our custom loss function
-        model.compile(optimizer=Adam(lr=self.actor_lr),
-                      loss=[self.proximal_policy_optimization_loss(
-                          advantage=advantage,
-                          old_pred=old_pred
-                      )])
-        return model
-
-    def build_critic_model(self):
-        # critic recieves the observation as input
-        state_inputs = Input(shape=self.observation_space.shape)
-
-        # hidden layers
-        x = Dense(self.hidden_size, activation='relu')(state_inputs)
-        x = Dense(self.hidden_size, activation='relu')(x)
-
-        # we predict the value of the current observation
-        predictions = Dense(1, activation='linear')(x)
-
-        model = Model(inputs=state_inputs, outputs=predictions)
-        model.compile(optimizer=Adam(lr=self.critic_lr),
-                      loss='mse')
-        return model
-
     def step(self, observation):
         # Predict the probability destribution of the actions as a vactor
-        prob = self.models['actor'].predict([np.array([observation]),
-                                   self.DUMMY_VALUE,
-                                   self.DUMMY_ACTION])
-        prob = prob.flatten()
+        prob, _ = self.model(np.array([observation]))
+        prob = tf.nn.softmax(prob).numpy().flatten()
 
         # Sample an action as a scaler
         action = np.random.choice(self.action_space.n, 1, p=prob)[0]
@@ -110,6 +113,40 @@ class Agent:
         action_vector[action] = 1
 
         return action, action_vector, prob
+    
+    def get_grads(self, observation, action, advantage, old_pred):
+        observation_tensor = tf.convert_to_tensor(observation, dtype=tf.float32)
+        action_tensor = tf.convert_to_tensor(action, dtype=tf.float32)
+        advantage_tensor = tf.convert_to_tensor(advantage, dtype=tf.float32)
+        old_pred_tensor = tf.convert_to_tensor(old_pred, dtype=tf.float32)
+        
+        # Actor Grads
+        loss_function = self.proximal_policy_optimization_loss(advantage_tensor, old_pred_tensor)
+        with tf.GradientTape() as tape:
+            logits, values = self.model(observation_tensor)
+            probs = tf.nn.softmax(logits)
+            actor_loss = -loss_function(action_tensor, probs)
+            #actor_loss = values*tf.log(probs + 1e-10)
+            
+        actor_grad_tensors = tape.gradient(actor_loss, self.model.actor.trainable_weights)
+        actor_grads = [g.numpy() for g in actor_grad_tensors]
+        
+        with tf.GradientTape() as tape:
+            logits, values = self.model(observation_tensor)
+            probs = tf.nn.softmax(logits)
+            critic_loss = -tf.reduce_mean((advantage_tensor - values)**2)
+            
+        critic_grad_tensors = tape.gradient(critic_loss, self.model.critic.trainable_weights)
+        critic_grads = [g.numpy() for g in critic_grad_tensors]
+
+        return actor_grads, critic_grads
+    
+    def apply_grads(self, actor_grads, critic_grads):
+        for w, ag in zip(self.model.actor.trainable_weights, actor_grads):
+            w.assign_add(self.actor_lr * np.array(ag))
+            
+        for w, cg in zip(self.model.critic.trainable_weights, critic_grads):
+            w.assign_add(self.critic_lr * np.array(cg))
 
     def train_on_batch(self, observations, actions, probabilities, rewards):
         # limit our data to the buffer_size
@@ -118,26 +155,28 @@ class Agent:
         probs = probabilities[:self.buffer_size]
         rews = rewards[:self.buffer_size]
         old_probs = probs
-
+        
         # Calculate advantages
-        values = self.models['critic'].predict(obs).reshape((self.buffer_size, 1))
-        advs = rews - values
-
-        # Train the actor and critic on the batch data
-        self.models['actor'].fit([obs, advs, old_probs], [acts],
-                       batch_size=self.batch_size, shuffle=True,
-                       epochs=self.epochs, verbose=False)
-        self.models['critic'].fit([obs], [advs],
-                       batch_size=self.batch_size, shuffle=True,
-                        epochs=self.epochs, verbose=False)
+        _, values = self.model(obs)
+        advs = rews - values.numpy().reshape((self.buffer_size, 1))
+        
+        for epoch in range(self.epochs):
+            batch_index = np.random.choice(self.buffer_size, self.batch_size)
+            actor_grads, critic_grads = self.get_grads(
+                obs[batch_index],
+                acts[batch_index],
+                advs[batch_index],
+                old_probs[batch_index]
+            )
+            self.apply_grads(actor_grads, critic_grads)
 
     def train(self, episodes=100):
         self.episode = 0
         self.max_episodes = episodes
-        self.build_models()
         self.training_loop()
 
     def training_loop(self):
+        self.episode_rews = []
         # reset the environment
         observation = self.env.reset()
 
@@ -185,8 +224,9 @@ class Agent:
                     for rew in ep_batch['reward']:
                         total_episode_reward += rew
 
-                    if (self.episode + 1) % 10 == 0:
+                    if (self.episode + 1) % 100 == 0:
                         print('Ep: {}, Rew: {}'.format(self.episode, total_episode_reward))
+                    self.episode_rews.append(total_episode_reward)
 
                     # transform rewards based to discounted cumulative rewards
                     for j in range(len(ep_batch['reward']) - 2, -1, -1):
