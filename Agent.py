@@ -55,7 +55,7 @@ class ActorCriticModel(keras.Model):
         return logits, values
 
 class Agent:
-    def __init__(self, env, epsilon=0.2, gamma=0.99, entropy_loss=1e-3, actor_lr=0.01, critic_lr=0.001,
+    def __init__(self, env, epsilon=0.2, gamma=0.99, entropy_loss=1e-3, actor_lr=0.001, critic_lr=0.001,
                 hidden_size=128, epochs=10, batch_size=64, buffer_size=256, *args, **kwargs):
         self.env = env
         self.action_space = env.action_space
@@ -134,7 +134,7 @@ class Agent:
         with tf.GradientTape() as tape:
             logits, values = self.model(observation_tensor)
             probs = tf.nn.softmax(logits)
-            critic_loss = -tf.reduce_mean((advantage_tensor - values)**2)
+            critic_loss = -tf.reduce_sum((advantage_tensor - values)**2)
             
         critic_grad_tensors = tape.gradient(critic_loss, self.model.critic.trainable_weights)
         critic_grads = [g.numpy() for g in critic_grad_tensors]
