@@ -14,7 +14,7 @@ class ActorModel(keras.Model):
         super(ActorModel, self).__init__()
         self.state_size = state_size
         self.action_size = action_size
-        self.dense1 = layers.Dense(100, activation='relu')
+        self.dense1 = layers.Dense(128, activation='relu')
         self.policy_logits = layers.Dense(action_size)
 
     def call(self, observation):
@@ -29,7 +29,7 @@ class CriticModel(keras.Model):
         super(CriticModel, self).__init__()
         self.state_size = state_size
         self.action_size = action_size
-        self.dense2 = layers.Dense(100, activation='relu')
+        self.dense2 = layers.Dense(128, activation='relu')
         self.values = layers.Dense(1)
 
     def call(self, observation):
@@ -55,8 +55,8 @@ class ActorCriticModel(keras.Model):
         return logits, values
 
 class Agent:
-    def __init__(self, env, epsilon=0.2, gamma=0.99, entropy_loss=1e-3, actor_lr=0.001, critic_lr=0.001,
-                hidden_size=128, epochs=10, batch_size=64, buffer_size=256, *args, **kwargs):
+    def __init__(self, env, epsilon=0.2, gamma=0.99, entropy_loss=1e-3, actor_lr=0.001, critic_lr=0.0005,
+                hidden_size=128, epochs=32, batch_size=64, buffer_size=256, *args, **kwargs):
         self.env = env
         self.action_space = env.action_space
         self.observation_space = env.observation_space
@@ -114,27 +114,37 @@ class Agent:
 
         return action, action_vector, prob
     
-    def get_grads(self, observation, action, advantage, old_pred):
-        observation_tensor = tf.convert_to_tensor(observation, dtype=tf.float32)
-        action_tensor = tf.convert_to_tensor(action, dtype=tf.float32)
-        advantage_tensor = tf.convert_to_tensor(advantage, dtype=tf.float32)
-        old_pred_tensor = tf.convert_to_tensor(old_pred, dtype=tf.float32)
-        
+    def cat_entropy(self, logits):
+        a0 = logits - tf.reduce_max(logits, 1, keep_dims=True)
+        ea0 = tf.exp(a0)
+        z0 = tf.reduce_sum(ea0, 1, keep_dims=True)
+        p0 = ea0 / z0
+        return tf.reduce_sum(p0 * (tf.log(z0) - a0), 1)
+    
+    def get_grads(self, observations, actions, rewards, old_probs):
         # Actor Grads
-        loss_function = self.proximal_policy_optimization_loss(advantage_tensor, old_pred_tensor)
+        
         with tf.GradientTape() as tape:
-            logits, values = self.model(observation_tensor)
-            probs = tf.nn.softmax(logits)
-            actor_loss = -loss_function(action_tensor, probs)
-            #actor_loss = values*tf.log(probs + 1e-10)
+            logits, values = self.model(observations)
+            actions = tf.stop_gradient(actions)
+            neglogpac = tf.nn.softmax_cross_entropy_with_logits(logits=logits, labels=actions)
+            advantages = rewards - values
+            advantages = tf.stop_gradient(advantages)
+            
+            entropy = tf.reduce_mean(self.cat_entropy(logits))
+            actor_loss = -tf.reduce_mean(advantages * neglogpac) + self.entropy_loss * entropy
+            #probs = tf.nn.softmax(logits)
+            #values = tf.stop_gradient(values)
+            #loss_function = self.proximal_policy_optimization_loss(values, old_probs)
+            #actor_loss = loss_function(old_probs, probs)
+            #actor_loss = -tf.reduce_mean(-tf.log(probs + 1e-10) * (actions * values))
             
         actor_grad_tensors = tape.gradient(actor_loss, self.model.actor.trainable_weights)
         actor_grads = [g.numpy() for g in actor_grad_tensors]
         
         with tf.GradientTape() as tape:
-            logits, values = self.model(observation_tensor)
-            probs = tf.nn.softmax(logits)
-            critic_loss = -tf.reduce_sum((advantage_tensor - values)**2)
+            logits, values = self.model(observations)
+            critic_loss = -tf.reduce_mean((rewards - values)**2)
             
         critic_grad_tensors = tape.gradient(critic_loss, self.model.critic.trainable_weights)
         critic_grads = [g.numpy() for g in critic_grad_tensors]
@@ -154,19 +164,14 @@ class Agent:
         acts = actions[:self.buffer_size]
         probs = probabilities[:self.buffer_size]
         rews = rewards[:self.buffer_size]
-        old_probs = probs
-        
-        # Calculate advantages
-        _, values = self.model(obs)
-        advs = rews - values.numpy().reshape((self.buffer_size, 1))
         
         for epoch in range(self.epochs):
-            batch_index = np.random.choice(self.buffer_size, self.batch_size)
+            batch_index = np.random.choice(self.buffer_size, self.batch_size, replace=False)
             actor_grads, critic_grads = self.get_grads(
                 obs[batch_index],
                 acts[batch_index],
-                advs[batch_index],
-                old_probs[batch_index]
+                rews[batch_index],
+                probs[batch_index]
             )
             self.apply_grads(actor_grads, critic_grads)
 
