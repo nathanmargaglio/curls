@@ -10,6 +10,7 @@ import multiprocessing as mp
 import sqlalchemy as db
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.sql.expression import func
 from sqlalchemy import Column, Integer, String, DateTime, Float, Boolean
 import datetime
 
@@ -28,7 +29,7 @@ class MarkovDecisionProcess:
             self.engine = db.create_engine('sqlite://')
         else:
             os.makedirs(path, exist_ok=True)
-            self.engine = db.create_engine(f'sqlite:///{path}{int(time.time())}.db')
+            self.engine = db.create_engine(f'sqlite:///{path}{name}_{version}.db')
 
         self.connection = self.engine.connect()
         self.Session = sessionmaker(bind=self.engine)
@@ -75,7 +76,11 @@ class MarkovDecisionProcess:
             "actions": [],
             "discounted_rewards": []
         }
-        for episode in range(episodes):
+        last_episode = self.session.query(func.max(self.Table.episode)).first()[0]
+        if last_episode is None:
+            last_episode = 0
+        
+        for episode in range(last_episode, episodes + last_episode):
             observations, actions, rewards, dones, infos = self.run(agent, env, episode, verbose=verbose)
 
             batch['observations'] += observations
@@ -137,7 +142,7 @@ class MarkovDecisionProcess:
                     "reward": self.reward,
                     "done": self.done,
                     "info": json.loads(self.info),
-                    "time": self.time
+                    "time": str(self.time)
                 }
 
         Base.metadata.create_all(self.engine)
@@ -157,10 +162,10 @@ class MarkovDecisionProcess:
         return t
     
     def tail(self, limit=10):
-        return self.session.query(self.table).order_by(self.table.id.desc()).limit(limit).all()[::-1]
+        return self.session.query(self.Table).order_by(self.Table.id.desc()).limit(limit).all()[::-1]
     
-    def last(self, limit=10, update_last=True):
-        last_called = self.session.query(self.table).order_by(self.table.id.desc()).first()
+    def last(self, update_last=True):
+        last_called = self.session.query(self.Table).order_by(self.Table.id.desc()).first()
         if update_last:
             self.last_called = last_called
         return last_called
