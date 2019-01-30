@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import shutil
+import dill
 
 import numpy as np
 import multiprocessing as mp
