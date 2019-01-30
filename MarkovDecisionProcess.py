@@ -6,9 +6,193 @@ import os
 import shutil
 
 import numpy as np
-import matplotlib.pyplot as plt
 import multiprocessing as mp
+import sqlalchemy as db
+from sqlalchemy.orm import sessionmaker
+from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy import Column, Integer, String, DateTime, Float, Boolean
+import datetime
 
+import tensorflow as tf
+config = tf.ConfigProto()
+config.gpu_options.allow_growth = True
+tf.enable_eager_execution(config=config)
+    
+class MarkovDecisionProcess:
+    def __init__(self, name='mdp', version=0, path='mdps/', memory=False, *args, **kargs):
+        self.name = name
+        self.version = version
+        self.path = path
+        self.memory = memory
+        if self.memory:
+            self.engine = db.create_engine('sqlite://')
+        else:
+            os.makedirs(path, exist_ok=True)
+            self.engine = db.create_engine(f'sqlite:///{path}{int(time.time())}.db')
+
+        self.connection = self.engine.connect()
+        self.Session = sessionmaker(bind=self.engine)
+        self.session = self.Session()
+        
+        self.Table = self.generate_table()
+        self.table = self.Table()
+        self.last_called = None
+        self.episode = None
+        
+    def run(self, agent, env, episode=None, verbose=False, *args, **kargs):
+        obs = env.reset()
+        done = False
+        rewards = []
+        actions = []
+        observations = []
+        dones = []
+        infos = []
+
+        step = 0
+        while not done:
+            logits, _ = agent.model(tf.convert_to_tensor(obs[None, :], dtype=tf.float32))
+            probs = tf.nn.softmax(logits)
+            action = np.random.choice(env.action_space.n, p=probs.numpy()[0])
+
+            next_obs, reward, done, info = env.step(action)
+
+            observations.append(obs)
+            actions.append(action)
+            rewards.append(reward)
+            dones.append(done)
+            infos.append(info)
+            if episode is not None:
+                self.log(step, episode, obs, action, reward, done, info)
+
+            obs = next_obs
+            step += 1
+            if done:
+                return observations, actions, rewards, dones, infos
+            
+    def train(self, agent, env, episodes, verbose=False):
+        batch = {
+            "observations": [],
+            "actions": [],
+            "discounted_rewards": []
+        }
+        for episode in range(episodes):
+            observations, actions, rewards, dones, infos = self.run(agent, env, episode, verbose=verbose)
+
+            batch['observations'] += observations
+            batch['actions'] += actions
+            batch['discounted_rewards'] += get_discounted_rewards(rewards, agent.gamma)
+
+            if len(batch['observations']) >= agent.batch_size:
+                for epoch in range(agent.epochs):
+                    agent.learn(**batch)
+                batch = {
+                    "observations": [],
+                    "actions": [],
+                    "discounted_rewards": []
+                }
+        
+    def __enter__(self):
+        return self
+    
+    def __exit__(self, exc_type, exc_value, traceback):
+        pass
+    
+    def generate_table(self):
+        Base = declarative_base()
+        class Table(Base):
+            __tablename__ = 'mdp'
+
+            id = Column(Integer, primary_key=True)
+            step = Column(Integer)
+            episode = Column(Integer)
+            observation = Column(String)
+            action = Column(String)
+            reward = Column(Float)
+            done = Column(Boolean)
+            info = Column(String)
+            time = Column(DateTime, default=datetime.datetime.utcnow)
+            
+            def __repr__(self):
+                return f"{self.time} - Step {self.step}"
+            
+            def __str__(self):
+                s =  f"id     : {self.id}\n"
+                s += f"step   : {self.step}\n"
+                s += f"episode: {self.episode}\n"
+                s += f"obs.   : {self.observation}\n"
+                s += f"action : {self.action}\n"
+                s += f"reward : {self.reward}\n"
+                s += f"done   : {self.done}\n"
+                s += f"info   : {self.info}\n"
+                s += f"time   : {self.time}\n"
+                return s
+            
+            def __call__(self):
+                return {
+                    "id": self.id,
+                    "step": self.step,
+                    "episode": self.episode,
+                    "observation": json.loads(self.observation),
+                    "action": json.loads(self.action),
+                    "reward": self.reward,
+                    "done": self.done,
+                    "info": json.loads(self.info),
+                    "time": self.time
+                }
+
+        Base.metadata.create_all(self.engine)
+        return Table
+    
+    def log(self, step, episode, observation, action, reward, done, info):
+        t = self.Table(step=int(step),
+                       episode=int(episode),
+                       observation=json.dumps(observation, cls=NumpyEncoder),
+                       action=json.dumps(action, cls=NumpyEncoder),
+                       reward=float(reward),
+                       done=bool(done),
+                       info=json.dumps(info, cls=NumpyEncoder)
+                      )
+        self.session.add(t)
+        self.session.commit()
+        return t
+    
+    def tail(self, limit=10):
+        return self.session.query(self.table).order_by(self.table.id.desc()).limit(limit).all()[::-1]
+    
+    def last(self, limit=10, update_last=True):
+        last_called = self.session.query(self.table).order_by(self.table.id.desc()).first()
+        if update_last:
+            self.last_called = last_called
+        return last_called
+    
+    def since_last(self, limit=10, update_last=True):
+        since_last_query = self.session.query(self.table).order_by(self.table.id.desc())
+        if self.last_called is not None:
+            since_last_query = since_last_query.filter(table.id > self.last_called.id)
+            
+        since_last = since_last_query.limit(limit).all()[::-1]
+        if update_last and len(since_last):
+            self.last_called = since_last[-1]
+        return since_last
+    
+    def rollback(self):
+        return self.session.rollback()
+    
+class NumpyEncoder(json.JSONEncoder):
+    def default(self, obj):
+        if isinstance(obj, np.ndarray):
+            return obj.tolist()
+        return json.JSONEncoder.default(self, obj)
+    
+def get_discounted_rewards(rewards, gamma=0.99):
+    discounted_rewards = []
+    reward_sum = 0
+    for reward in rewards[::-1]:
+        reward_sum = reward + gamma * reward_sum
+        discounted_rewards.append(reward_sum)
+    discounted_rewards.reverse()
+    return discounted_rewards
+    
 def start_master():
     import tensorflow as tf
     config = tf.ConfigProto()
@@ -84,120 +268,3 @@ def start_worker(input_data, output_data):
                 model.set_weights(msg['weights'])
     except KeyboardInterrupt as e:
         print(header, 'Stopped.')
-
-class MarkovDecisionProcess:
-    def __init__(self, name='mdp', version=0, path='mdps/',
-                 save=True, verbose=False, overwrite=False, *args, **kargs):
-        self.name = name
-        self.version = version
-        if path[-1] != '/':
-            path.append('/')
-        self.path = path
-        self.save = save
-        self.verbose = verbose
-        self.overwrite = overwrite
-        self.kargs = kargs
-        
-        self.handlers = {}
-        self.loggers = {}
-        logging.basicConfig(level=logging.INFO, format='%(message)s')
-        self.mdp_path = "{}{}-{}/".format(self.path, self.name, self.version)
-        self.model_path = self.mdp_path + 'models/'
-        self.data_path = self.mdp_path + 'data/'
-        
-    def __enter__(self):
-        return self
-    
-    def __exit__(self, exc_type, exc_value, traceback):
-        pass
-    
-    def increment_version(self):
-        extra_version = 0
-        while True:
-            self.version = len(self.get_previous_run_versions()) + extra_version
-            proposed_mdp_path = "{}{}-{}/".format(self.path, self.name, self.version)
-            if os.path.isdir(proposed_mdp_path):
-                extra_version += 1
-            else:
-                break
-            if extra_version > 999:
-                raise StopIteration('Exceeded 999 runs of the name {}'.format(self.name))
-    
-    def create_log_dir(self):
-        if os.path.isdir(self.path):
-            if self.overwrite:
-                shutil.rmtree(self.mdp_path)
-            else:
-                raise FileExistsError("{} exists and overwrite=False.".format(self.mdp_path))
-                
-        # Make sure our paths exist
-        os.makedirs(self.path, exist_ok=True)
-        os.makedirs(self.mdp_path, exist_ok=True)
-        os.makedirs(self.model_path, exist_ok=True)
-        os.makedirs(self.data_path, exist_ok=True)
-        
-    def get_previous_run_versions(self):
-        try:
-            files = os.listdir(self.path)
-            files = [f for f in files if self.name + '-' in f]
-            return files
-        except FileNotFoundError as e:
-            print("Root path {} doesn't exist.  Creating it...".format(self.path))
-            os.makedirs(self.path, exist_ok=True)
-            return []
-        
-    def setup_logger(self, name, sub_path=''):
-        name = sub_path + name
-        logger_path = '{}{}{}.txt'.format(self.data_path, sub_path, name)
-        handler = logging.FileHandler(logger_path)
-        logger = logging.getLogger(name)
-        logger.addHandler(handler)
-        
-        if self.verbose:
-            print('verbose')
-            console_handler = logging.StreamHandler()
-            logger.addHandler(console_handler)
-            
-        self.handlers[name] = handler
-        self.loggers[name] = logger
-        
-        return self.loggers[name]
-    
-    def log(self, value, name, sub_path=''):
-        name = sub_path + name
-        self.loggers[name].info(NumpyMessage(value))
-        
-    def get_log(self, name, sub_path=''):
-        name = sub_path + name
-        self.close_log(name)
-        logger_path = '{}{}{}.txt'.format(self.data_path, sub_path, name)
-        data = []
-        with open(logger_path) as f:
-            for line in f.readlines():
-                data.append(json.loads(line))
-                
-        return data
-    
-    def close_log(self, name=None):
-        if name is None:
-            names = list(self.loggers.keys())[:]
-            for n in names:
-                self.loggers.pop(n)
-                self.handlers.pop(n).close()
-        else:
-            if name in self.loggers.keys():
-                self.loggers.pop(name)
-                self.handlers.pop(name).close()
-                
-class NumpyEncoder(json.JSONEncoder):
-    def default(self, obj):
-        if isinstance(obj, np.ndarray):
-            return obj.tolist()
-        return json.JSONEncoder.default(self, obj)
-
-class NumpyMessage(object):
-    def __init__(self, data):
-        self.data = data
-
-    def __str__(self):
-        return json.dumps(self.data, cls=NumpyEncoder)
