@@ -5,23 +5,25 @@ import logging
 import os
 import shutil
 import dill
-
-import numpy as np
+import datetime
 import multiprocessing as mp
+
 import sqlalchemy as db
-from sqlalchemy.orm import sessionmaker
+from sqlalchemy.orm import sessionmaker, relationship
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.sql.expression import func
-from sqlalchemy import Column, Integer, String, DateTime, Float, Boolean
-import datetime
+from sqlalchemy import Column, Integer, String, DateTime, Float, Boolean, ForeignKey
+Base = declarative_base()
 
+from git import Repo
+import numpy as np
 import tensorflow as tf
 config = tf.ConfigProto()
 config.gpu_options.allow_growth = True
 tf.enable_eager_execution(config=config)
     
 class MarkovDecisionProcess:
-    def __init__(self, name='mdp', version=0, path='mdps/', memory=False, *args, **kargs):
+    def __init__(self, name='session', version=0, path='sessions/', memory=False, *args, **kargs):
         self.name = name
         self.version = version
         self.path = path
@@ -35,11 +37,11 @@ class MarkovDecisionProcess:
         self.connection = self.engine.connect()
         self.Session = sessionmaker(bind=self.engine)
         self.session = self.Session()
+        self.generate_tables()
+        self.Episode = Episode
+        self.Step = Step
         
-        self.Table = self.generate_table()
-        self.table = self.Table()
         self.last_called = None
-        self.episode = None
         
     def run(self, agent, env, episode=None, verbose=False, *args, **kargs):
         obs = env.reset()
@@ -50,7 +52,8 @@ class MarkovDecisionProcess:
         dones = []
         infos = []
 
-        step = 0
+        step_count = 0
+        total_rewards = 0
         while not done:
             logits, _ = agent.model(tf.convert_to_tensor(obs[None, :], dtype=tf.float32))
             probs = tf.nn.softmax(logits)
@@ -63,11 +66,15 @@ class MarkovDecisionProcess:
             rewards.append(reward)
             dones.append(done)
             infos.append(info)
+            
+            total_rewards += reward
             if episode is not None:
-                self.log(step, episode, obs, action, reward, done, info)
+                self.save_step(step_count, episode, obs, action, reward, done, info)
+                episode.total_rewards = total_rewards
+                self.session.commit()
 
             obs = next_obs
-            step += 1
+            step_count += 1
             if done:
                 return observations, actions, rewards, dones, infos
             
@@ -77,12 +84,15 @@ class MarkovDecisionProcess:
             "actions": [],
             "discounted_rewards": []
         }
-        last_episode = self.session.query(func.max(self.Table.episode)).first()[0]
+        last_episode = self.session.query(Episode).order_by(Episode.id.desc()).first()
         if last_episode is None:
-            last_episode = 0
+            start_episode = 0
+        else:
+            start_episode = last_episode.episode_count + 1
         
-        for episode in range(last_episode, episodes + last_episode):
-            observations, actions, rewards, dones, infos = self.run(agent, env, episode, verbose=verbose)
+        for episode in range(start_episode, start_episode + episodes):
+            episode_instance = self.save_episode(episode, 0, agent.__class__, agent.model.get_weights())
+            observations, actions, rewards, dones, infos = self.run(agent, env, episode_instance, verbose=verbose)
 
             batch['observations'] += observations
             batch['actions'] += actions
@@ -96,71 +106,50 @@ class MarkovDecisionProcess:
                     "actions": [],
                     "discounted_rewards": []
                 }
+            
         
     def __enter__(self):
         return self
     
     def __exit__(self, exc_type, exc_value, traceback):
-        pass
+        self.rollback()
+        self.session.close()
     
-    def generate_table(self):
-        Base = declarative_base()
-        class Table(Base):
-            __tablename__ = 'mdp'
-
-            id = Column(Integer, primary_key=True)
-            step = Column(Integer)
-            episode = Column(Integer)
-            observation = Column(String)
-            action = Column(String)
-            reward = Column(Float)
-            done = Column(Boolean)
-            info = Column(String)
-            time = Column(DateTime, default=datetime.datetime.utcnow)
-            
-            def __repr__(self):
-                return f"{self.time} - Step {self.step}"
-            
-            def __str__(self):
-                s =  f"id     : {self.id}\n"
-                s += f"step   : {self.step}\n"
-                s += f"episode: {self.episode}\n"
-                s += f"obs.   : {self.observation}\n"
-                s += f"action : {self.action}\n"
-                s += f"reward : {self.reward}\n"
-                s += f"done   : {self.done}\n"
-                s += f"info   : {self.info}\n"
-                s += f"time   : {self.time}\n"
-                return s
-            
-            def __call__(self):
-                return {
-                    "id": self.id,
-                    "step": self.step,
-                    "episode": self.episode,
-                    "observation": json.loads(self.observation),
-                    "action": json.loads(self.action),
-                    "reward": self.reward,
-                    "done": self.done,
-                    "info": json.loads(self.info),
-                    "time": str(self.time)
-                }
-
+    def rollback(self):
+        return self.session.rollback()
+    
+    def generate_tables(self):
         Base.metadata.create_all(self.engine)
-        return Table
     
-    def log(self, step, episode, observation, action, reward, done, info):
-        t = self.Table(step=int(step),
-                       episode=int(episode),
+    def save_step(self, step_count, episode, observation, action, reward, done, info):
+        s = Step(step_count=int(step_count),
+                       episode=episode,
                        observation=json.dumps(observation, cls=NumpyEncoder),
                        action=json.dumps(action, cls=NumpyEncoder),
                        reward=float(reward),
                        done=bool(done),
                        info=json.dumps(info, cls=NumpyEncoder)
                       )
-        self.session.add(t)
+        self.session.add(s)
         self.session.commit()
-        return t
+        return s
+    
+    def save_episode(self, episode, total_reward, agent_class, weights):
+        try:
+            repo = Repo('./')
+            commit = repo.head.object.hexsha
+        except:
+            commit = None
+        
+        e = Episode(count=int(episode),
+                    total_reward=float(total_reward),
+                    agent_class=dill.dumps(agent_class),
+                    weights=json.dumps(weights, cls=NumpyEncoder),
+                    commit=commit
+                   )
+        self.session.add(e)
+        self.session.commit()
+        return e
     
     def tail(self, limit=10):
         return self.session.query(self.Table).order_by(self.Table.id.desc()).limit(limit).all()[::-1]
@@ -170,6 +159,11 @@ class MarkovDecisionProcess:
         if update_last:
             self.last_called = last_called
         return last_called
+    
+    def get_episode(self, episode=None):
+        if episode is None:
+            episode = self.session.query(func.max(self.Table.episode)).first()[0]
+        return self.session.query(self.Table).filter(self.Table.episode == episode).all()
     
     def since_last(self, limit=10, update_last=True):
         since_last_query = self.session.query(self.table).order_by(self.table.id.desc())
@@ -181,9 +175,81 @@ class MarkovDecisionProcess:
             self.last_called = since_last[-1]
         return since_last
     
-    def rollback(self):
-        return self.session.rollback()
-    
+class Step(Base):
+    __tablename__ = 'steps'
+
+    id = Column(Integer, primary_key=True)
+    step_count = Column(Integer)
+    episode_count = Column(Integer, ForeignKey('episodes.count'))
+    observation = Column(String)
+    action = Column(String)
+    reward = Column(Float)
+    done = Column(Boolean)
+    info = Column(String)
+    time = Column(DateTime, default=datetime.datetime.utcnow)
+
+    def __repr__(self):
+        return f"{self.time} - Step {self.step_count}"
+
+    def __str__(self):
+        s =  f"id     : {self.id}\n"
+        s += f"step.  : {self.step_count}\n"
+        s += f"episode: {self.episode_count}\n"
+        s += f"obs.   : {self.observation}\n"
+        s += f"action : {self.action}\n"
+        s += f"reward : {self.reward}\n"
+        s += f"done   : {self.done}\n"
+        s += f"info   : {self.info}\n"
+        s += f"time   : {self.time}\n"
+        return s
+
+    def __call__(self):
+        return {
+            "id": self.id,
+            "step_count": self.step_count,
+            "episode": self.episode_count,
+            "observation": json.loads(self.observation),
+            "action": json.loads(self.action),
+            "reward": self.reward,
+            "done": self.done,
+            "info": json.loads(self.info),
+            "time": str(self.time)
+        }
+
+class Episode(Base):
+    __tablename__ = 'episodes'
+
+    id = Column(Integer, primary_key=True)
+    owned_steps = relationship("Step", backref='episode')
+    count = Column(Integer)
+    total_reward = Column(Float)
+
+    agent_class = Column(String)
+    weights = Column(String)
+    commit = Column(String)
+
+    start_time = Column(DateTime, default=datetime.datetime.utcnow)
+    end_time = Column(DateTime, default=None)
+
+    def __repr__(self):
+        return f"{self.start_time} - Episode {self.count}"
+
+    def __str__(self):
+        s =  f"Episode {self.episode_count}"
+        return s
+
+    def __call__(self):
+        return {
+            "id": self.id,
+            "count": self.count,
+            "total_reward": self.total_reward,
+            "agent_class": dill.loads(self.agent_class),
+            "weights": json.loads(self.weights),
+            "commit": self.commit,
+            "start_time": str(self.start_time),
+            "end_time": str(self.end_time)
+        }
+            
 class NumpyEncoder(json.JSONEncoder):
     def default(self, obj):
         if isinstance(obj, np.ndarray):

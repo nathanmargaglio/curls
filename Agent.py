@@ -48,6 +48,7 @@ class ActorCriticModel(keras.Model):
         self.action_shape = action_shape
         self.actor = ActorModel(observation_shape, action_shape, hidden_size)
         self.critic = CriticModel(observation_shape, action_shape, hidden_size)
+        self(tf.convert_to_tensor([np.random.random(observation_shape)], dtype=tf.float32))
         
     def call(self, inputs):
         return self.actor(inputs), self.critic(inputs)
