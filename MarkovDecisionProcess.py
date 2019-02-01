@@ -21,6 +21,8 @@ import tensorflow as tf
 config = tf.ConfigProto()
 config.gpu_options.allow_growth = True
 tf.enable_eager_execution(config=config)
+
+from Models import Step, Episode
     
 class MarkovDecisionProcess:
     def __init__(self, name='session', version=0, path='sessions/', memory=False, *args, **kargs):
@@ -174,81 +176,6 @@ class MarkovDecisionProcess:
         if update_last and len(since_last):
             self.last_called = since_last[-1]
         return since_last
-    
-class Step(Base):
-    __tablename__ = 'steps'
-
-    id = Column(Integer, primary_key=True)
-    step_count = Column(Integer)
-    episode_count = Column(Integer, ForeignKey('episodes.count'))
-    observation = Column(String)
-    action = Column(String)
-    reward = Column(Float)
-    done = Column(Boolean)
-    info = Column(String)
-    time = Column(DateTime, default=datetime.datetime.utcnow)
-
-    def __repr__(self):
-        return f"{self.time} - Step {self.step_count}"
-
-    def __str__(self):
-        s =  f"id     : {self.id}\n"
-        s += f"step.  : {self.step_count}\n"
-        s += f"episode: {self.episode_count}\n"
-        s += f"obs.   : {self.observation}\n"
-        s += f"action : {self.action}\n"
-        s += f"reward : {self.reward}\n"
-        s += f"done   : {self.done}\n"
-        s += f"info   : {self.info}\n"
-        s += f"time   : {self.time}\n"
-        return s
-
-    def __call__(self):
-        return {
-            "id": self.id,
-            "step_count": self.step_count,
-            "episode": self.episode_count,
-            "observation": json.loads(self.observation),
-            "action": json.loads(self.action),
-            "reward": self.reward,
-            "done": self.done,
-            "info": json.loads(self.info),
-            "time": str(self.time)
-        }
-
-class Episode(Base):
-    __tablename__ = 'episodes'
-
-    id = Column(Integer, primary_key=True)
-    owned_steps = relationship("Step", backref='episode')
-    count = Column(Integer)
-    total_reward = Column(Float)
-
-    agent_class = Column(String)
-    weights = Column(String)
-    commit = Column(String)
-
-    start_time = Column(DateTime, default=datetime.datetime.utcnow)
-    end_time = Column(DateTime, default=None)
-
-    def __repr__(self):
-        return f"{self.start_time} - Episode {self.count}"
-
-    def __str__(self):
-        s =  f"Episode {self.episode_count}"
-        return s
-
-    def __call__(self):
-        return {
-            "id": self.id,
-            "count": self.count,
-            "total_reward": self.total_reward,
-            "agent_class": dill.loads(self.agent_class),
-            "weights": json.loads(self.weights),
-            "commit": self.commit,
-            "start_time": str(self.start_time),
-            "end_time": str(self.end_time)
-        }
             
 class NumpyEncoder(json.JSONEncoder):
     def default(self, obj):
