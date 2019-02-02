@@ -32,6 +32,8 @@ class SessionManager:
         self.connection = self.engine.connect()
         self.DBSession = sessionmaker(bind=self.engine)
         self.db = self.DBSession()
+        self.configured = False
+        
         self.Session = Session
         self.Episode = Episode
         self.Step = Step
@@ -47,12 +49,19 @@ class SessionManager:
                            help="Which parent Session to branch from.")
         parser.add_argument('-r', '--rule', nargs='?', default='max-reward', type=str,
                            help="Which Session to branch from upon finishing.")
+        
+        parser.add_argument('-sp', '--session-parent', nargs='?', type=int,
+                           help="Parent ID (defaults to 'rule' argument)")
+        parser.add_argument('-sp', '--session-parent', nargs='?', type=int,
+                           help="Parent ID (defaults to 'rule' argument)")
 
-        args = parser.parse_args(arg_list, namespace=self)
+        parser.parse_args(arg_list, namespace=self)
+        self.configured = True
         
-    def create_session(self, config={}):
-        pass
-        
+    def start_training(self):
+        assert self.configured, "SessionManager needs to be configured first.\
+                      Run 'configure(<arg_list>)' first."
+        self.session = Session()
 
 class Session(Base):
     __tablename__ = 'sessions'
