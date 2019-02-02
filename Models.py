@@ -1,111 +1,59 @@
+import datetime
+import dill
+import json
+import sys
+import os
+import argparse
+
+import numpy as np
+from dotenv import load_dotenv
+
 import sqlalchemy as db
 from sqlalchemy.orm import sessionmaker, relationship, backref
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.sql.expression import func
 from sqlalchemy import Column, Integer, String, DateTime, Float, Boolean, ForeignKey
-import datetime
-import dill
-import json
-import numpy as np
 
 Base = declarative_base()
 
-class Step(Base):
-    __tablename__ = 'steps'
+def str_to_bool(v):
+    if v.lower() in ('yes', 'true', 't', 'y', '1'):
+        return True
+    elif v.lower() in ('no', 'false', 'f', 'n', '0'):
+        return False
+    else:
+        raise argparse.ArgumentTypeError('Boolean value expected.')
 
-    id = Column(Integer, primary_key=True)
-    iteration = Column(Integer)
-    
-    episode_id = Column(Integer, ForeignKey('episodes.id'))
-    episode = relationship("Episode", backref="steps")
-    
-    observation = Column(String)
-    action = Column(String)
-    reward = Column(Float)
-    done = Column(Boolean)
-    info = Column(String)
-    start_time = Column(DateTime, default=datetime.datetime.utcnow)
-    elapse_time = Column(Float)
-
-    def __repr__(self):
-        return f"Step {self.id}: {self.iteration}"
-    
-    def __str__(self):
-        s =  f"id      : {self.id}\n"
-        s += f"iter.   : {self.iteration}\n"
-        s += f"episode : {self.episode_id}\n"
-        s += f"obs.    : {self.observation}\n"
-        s += f"action  : {self.action}\n"
-        s += f"reward  : {self.reward}\n"
-        s += f"done    : {self.done}\n"
-        s += f"info    : {self.info}\n"
-        s += f"start_t : {self.start_time}\n"
-        s += f"elapse_t: {self.elapse_time}\n"
-        return s
-    
-    def set_data(self, data):
-        self.iteration = data["iteration"]
-        self.episode_id = data["episode_id"]
-        self.observation = json.dumps(data["observation"], cls=NumpyEncoder)
-        self.action = json.dumps(data["action"], cls=NumpyEncoder)
-        self.reward = data["reward"]
-        self.info = json.dumps(data["info"], cls=NumpyEncoder)
-
-    def __call__(self):
-        return {
-            "id": self.id,
-            "iteration": self.iteration,
-            "episode_id": self.episode_id,
-            "observation": json.loads(self.observation),
-            "action": json.loads(self.action),
-            "reward": self.reward,
-            "done": self.done,
-            "info": json.loads(self.info),
-            "start_time": str(self.start_time),
-            "elpase_time": self.elapse_time
-        }
-
-class Episode(Base):
-    __tablename__ = 'episodes'
-
-    id = Column(Integer, primary_key=True)
-    session_id = Column(Integer, ForeignKey('sessions.id'))
-    session = relationship("Session", backref="episodes")
-    iteration = Column(Integer)
-    total_reward = Column(Float)
-    start_time = Column(DateTime, default=datetime.datetime.utcnow)
-    elapse_time = Column(Float)
-
-    def __repr__(self):
-        return f"Episode {self.id}: {self.iteration}"
-
-    def __str__(self):
-        return f"Episode {self.id}"
-    
-    def __str__(self):
-        s =  f"id      : {self.id}\n"
-        s += f"iter.   : {self.iteration}\n"
-        s += f"session : {self.session_id}\n"
-        s += f"reward  : {self.total_reward}\n"
-        s += f"start_t : {self.start_time}\n"
-        s += f"elapse_t: {self.elapse_time}\n"
-        return s
-    
-    def set_data(self, data):
-        self.iteration = data["iteration"]
-        self.session_id = data["session_id"]
-        self.total_reward = data["total_reward"]
+class SessionManager:
+    def __init__(self, *args, **kargs):
+        load_dotenv()
+        self.database_url = os.getenv('DATABASE_URL')
+        self.engine = db.create_engine(self.database_url)
+        self.connection = self.engine.connect()
+        self.DBSession = sessionmaker(bind=self.engine)
+        self.db = self.DBSession()
+        self.Session = Session
+        self.Episode = Episode
+        self.Step = Step
+        Base.metadata.create_all(self.engine)
         
-    def __call__(self):
-        return {
-            "id": self.id,
-            "iteration": self.iteration,
-            "session_id": self.session_id,
-            "total_reward": self.total_reward,
-            "start_time": str(self.start_time),
-            "elapse_time": self.elapse_time
-        }
-    
+    def configure(self, arg_list=[]):
+        parser = argparse.ArgumentParser(
+            description='Session Manager.')
+        
+        parser.add_argument('-b', '--branch', nargs='?', default=True, type=str_to_bool,
+                           help="Branch from previous Session.")
+        parser.add_argument('-p', '--parent', nargs='?', default=None, type=str,
+                           help="Which parent Session to branch from.")
+        parser.add_argument('-r', '--rule', nargs='?', default='max-reward', type=str,
+                           help="Which Session to branch from upon finishing.")
+
+        args = parser.parse_args(arg_list, namespace=self)
+        
+    def create_session(self, config={}):
+        pass
+        
+
 class Session(Base):
     __tablename__ = 'sessions'
 
@@ -163,6 +111,102 @@ class Session(Base):
             "commit": self.commit,
             "start_time": str(self.start_time),
             "elapse_time": self.elapse_time
+        }
+
+class Episode(Base):
+    __tablename__ = 'episodes'
+
+    id = Column(Integer, primary_key=True)
+    session_id = Column(Integer, ForeignKey('sessions.id'))
+    session = relationship("Session", backref="episodes")
+    iteration = Column(Integer)
+    total_reward = Column(Float)
+    start_time = Column(DateTime, default=datetime.datetime.utcnow)
+    elapse_time = Column(Float)
+
+    def __repr__(self):
+        return f"Episode {self.id}: {self.iteration}"
+
+    def __str__(self):
+        return f"Episode {self.id}"
+    
+    def __str__(self):
+        s =  f"id      : {self.id}\n"
+        s += f"iter.   : {self.iteration}\n"
+        s += f"session : {self.session_id}\n"
+        s += f"reward  : {self.total_reward}\n"
+        s += f"start_t : {self.start_time}\n"
+        s += f"elapse_t: {self.elapse_time}\n"
+        return s
+    
+    def set_data(self, data):
+        self.iteration = data["iteration"]
+        self.session_id = data["session_id"]
+        self.total_reward = data["total_reward"]
+        
+    def __call__(self):
+        return {
+            "id": self.id,
+            "iteration": self.iteration,
+            "session_id": self.session_id,
+            "total_reward": self.total_reward,
+            "start_time": str(self.start_time),
+            "elapse_time": self.elapse_time
+        }
+    
+class Step(Base):
+    __tablename__ = 'steps'
+
+    id = Column(Integer, primary_key=True)
+    iteration = Column(Integer)
+    
+    episode_id = Column(Integer, ForeignKey('episodes.id'))
+    episode = relationship("Episode", backref="steps")
+    
+    observation = Column(String)
+    action = Column(String)
+    reward = Column(Float)
+    done = Column(Boolean)
+    info = Column(String)
+    start_time = Column(DateTime, default=datetime.datetime.utcnow)
+    elapse_time = Column(Float)
+
+    def __repr__(self):
+        return f"Step {self.id}: {self.iteration}"
+    
+    def __str__(self):
+        s =  f"id      : {self.id}\n"
+        s += f"iter.   : {self.iteration}\n"
+        s += f"episode : {self.episode_id}\n"
+        s += f"obs.    : {self.observation}\n"
+        s += f"action  : {self.action}\n"
+        s += f"reward  : {self.reward}\n"
+        s += f"done    : {self.done}\n"
+        s += f"info    : {self.info}\n"
+        s += f"start_t : {self.start_time}\n"
+        s += f"elapse_t: {self.elapse_time}\n"
+        return s
+    
+    def set_data(self, data):
+        self.iteration = data["iteration"]
+        self.episode_id = data["episode_id"]
+        self.observation = json.dumps(data["observation"], cls=NumpyEncoder)
+        self.action = json.dumps(data["action"], cls=NumpyEncoder)
+        self.reward = data["reward"]
+        self.info = json.dumps(data["info"], cls=NumpyEncoder)
+
+    def __call__(self):
+        return {
+            "id": self.id,
+            "iteration": self.iteration,
+            "episode_id": self.episode_id,
+            "observation": json.loads(self.observation),
+            "action": json.loads(self.action),
+            "reward": self.reward,
+            "done": self.done,
+            "info": json.loads(self.info),
+            "start_time": str(self.start_time),
+            "elpase_time": self.elapse_time
         }
         
 class NumpyEncoder(json.JSONEncoder):
