@@ -21,29 +21,10 @@ import tensorflow as tf
 config = tf.ConfigProto()
 config.gpu_options.allow_growth = True
 tf.enable_eager_execution(config=config)
-
-from Models import Step, Episode
     
 class MarkovDecisionProcess:
-    def __init__(self, name='session', version=0, path='sessions/', memory=False, *args, **kargs):
-        self.name = name
-        self.version = version
-        self.path = path
-        self.memory = memory
-        if self.memory:
-            self.engine = db.create_engine('sqlite://')
-        else:
-            os.makedirs(path, exist_ok=True)
-            self.engine = db.create_engine(f'sqlite:///{path}{name}_{version}.db')
-
-        self.connection = self.engine.connect()
-        self.Session = sessionmaker(bind=self.engine)
-        self.session = self.Session()
-        self.generate_tables()
-        self.Episode = Episode
-        self.Step = Step
-        
-        self.last_called = None
+    def __init__(self, *args, **kargs):
+        pass
         
     def run(self, agent, env, episode=None, verbose=False, *args, **kargs):
         obs = env.reset()
@@ -114,15 +95,10 @@ class MarkovDecisionProcess:
         return self
     
     def __exit__(self, exc_type, exc_value, traceback):
-        self.rollback()
+        self.session.rollback()
         self.session.close()
     
-    def rollback(self):
-        return self.session.rollback()
-    
-    def generate_tables(self):
-        Base.metadata.create_all(self.engine)
-    
+class Temp:
     def save_step(self, step_count, episode, observation, action, reward, done, info):
         s = Step(step_count=int(step_count),
                        episode=episode,

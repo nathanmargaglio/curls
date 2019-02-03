@@ -48,12 +48,13 @@ class ActorCriticModel(keras.Model):
         self.action_shape = action_shape
         self.actor = ActorModel(observation_shape, action_shape, hidden_size)
         self.critic = CriticModel(observation_shape, action_shape, hidden_size)
-        self(tf.convert_to_tensor([np.random.random(observation_shape)], dtype=tf.float32))
+        random_input = np.array([np.random.random(observation_shape)])
+        self(tf.convert_to_tensor(random_input, dtype=tf.float32))
         
     def call(self, inputs):
         return self.actor(inputs), self.critic(inputs)
         
-class Agent:
+class ActorCriticAgent:
     def __init__(self, env, gamma=0.99, ent_coef=0.001, lr=0.001, critic_coef=0.5,
                 hidden_size=128, epochs=8, batch_size=512, *args, **kwargs):
         self.env = env
