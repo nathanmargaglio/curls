@@ -7,12 +7,13 @@ import argparse
 
 import numpy as np
 from dotenv import load_dotenv
+from git import Repo
 
 import sqlalchemy as db
 from sqlalchemy.orm import sessionmaker, relationship, backref
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.sql.expression import func
-from sqlalchemy import Column, Integer, String, DateTime, Float, Boolean, ForeignKey
+from sqlalchemy import Column, Integer, String, DateTime, Float, Boolean, ForeignKey, desc
 
 Base = declarative_base()
 
@@ -34,51 +35,92 @@ class SessionManager:
         self.db = self.DBSession()
         self.configured = False
         
-        self.Session = Session
-        self.Episode = Episode
-        self.Step = Step
+        self.SessionClass = Session
+        self.EpisodeClass = Episode
+        self.StepClass = Step
         Base.metadata.create_all(self.engine)
+        self.configure()
         
     def configure(self, arg_list=[]):
         parser = argparse.ArgumentParser(
             description='Session Manager.')
         
-        parser.add_argument('-b', '--branch', nargs='?', default=True, type=str_to_bool,
-                           help="Branch from previous Session.")
-        parser.add_argument('-p', '--parent', nargs='?', default=None, type=str,
+        parser.add_argument('-p', '--parent', nargs='?', default=None, type=int,
                            help="Which parent Session to branch from.")
         parser.add_argument('-r', '--rule', nargs='?', default='max-reward', type=str,
                            help="Which Session to branch from upon finishing.")
+        parser.add_argument('-a', '--agent-id', nargs='?', default=None, type=int,
+                           help="Agent ID to branch from (default to parent Session's)")
+        parser.add_argument('-e', '--env-name', nargs='?', default='CartPole-v1', type=str,
+                           help="Gym Environment name to load.")
         
-        parser.add_argument('-sp', '--session-parent', nargs='?', type=int,
-                           help="Parent ID (defaults to 'rule' argument)")
-        parser.add_argument('-sp', '--session-parent', nargs='?', type=int,
-                           help="Parent ID (defaults to 'rule' argument)")
-
         parser.parse_args(arg_list, namespace=self)
         self.configured = True
         
-    def start_training(self):
-        assert self.configured, "SessionManager needs to be configured first.\
-                      Run 'configure(<arg_list>)' first."
-        self.session = Session()
+    def _get_parent_from_rule(self):
+        if self.rule == 'max-reward':
+            print(f"_get_parent_from_rule: self.rule={self.rule}")
+            return self.db.query(Session).order_by(desc(Session.average_reward)).limit(1).first()
+        else:
+            raise NameError(f"Rule {self.rule} is not defined.")
+        
+    def initialize_session(self):
+        if self.parent is not None:
+            parent = self.db.query(Session).get(self.parent)
+        else:
+            parent = self._get_parent_from_rule()
+            
+        if parent is None:
+            iteration = 0
+        else:
+            iteration = parent.iteration + 1
+            
+        if self.agent_id is not None:
+            agent = self.db.query(Agent).get(self.agent_id)
+        elif parent is None:
+            agent = Agent()
+        else:
+            agent = parent.agent
+            
+        try:
+            repo = Repo('./')
+            git_url = [url for url in repo.remote().urls][0]
+            commit = repo.head.object.hexsha
+        except:
+            git_url = None
+            commit = None
+            
+        self.session = Session(parent=parent, agent=agent, env_name=self.env_name,
+                               iteration=iteration, commit=commit, git_url=git_url)
+        self.db.add(self.session)
+        self.db.commit()
 
+class Agent(Base):
+    __tablename__ = 'agents'
+    id = Column(Integer, primary_key=True)
+    agent_class = Column(String)
+    config = Column(String)
+    weights = Column(String)
+    created_at = Column(DateTime, default=datetime.datetime.utcnow)
+    
+    def __repr__(self):
+        return f"Agent {self.id}"
+    
 class Session(Base):
     __tablename__ = 'sessions'
 
     id = Column(Integer, primary_key=True)
     children = relationship("Session", backref=backref('parent', remote_side=[id]))
     parent_id = Column(Integer, ForeignKey('sessions.id'))
+    
+    agent_id = Column(Integer, ForeignKey('agents.id'))
+    agent = relationship("Agent", backref="agent")
+    
     iteration = Column(Integer)
-
-    agent_class = Column(String)
-    agent_config = Column(String)
-    
     env_name = Column(String)
-    env_config = Column(String)
-    
-    weights = Column(String)
     commit = Column(String)
+    git_url = Column(String)
+    average_reward = Column(Float)
 
     start_time = Column(DateTime, default=datetime.datetime.utcnow)
     elapse_time = Column(Float)
