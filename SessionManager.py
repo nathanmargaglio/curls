@@ -29,7 +29,7 @@ class SessionManager:
     def __init__(self, *args, **kargs):
         load_dotenv()
         self.database_url = os.getenv('DATABASE_URL')
-        self.engine = db.create_engine(self.database_url)
+        self.engine = db.create_engine(self.database_url, pool_pre_ping=True)
         self.connection = self.engine.connect()
         self.DBSession = sessionmaker(bind=self.engine)
         self.db = self.DBSession()
@@ -50,8 +50,6 @@ class SessionManager:
                            help="Which parent Session to branch from.")
         parser.add_argument('-r', '--rule', nargs='?', default='max-reward', type=str,
                            help="Which Session to branch from upon finishing.")
-        parser.add_argument('-a', '--agent-id', nargs='?', default=None, type=int,
-                           help="Agent ID to branch from (default to parent Session's)")
         parser.add_argument('-e', '--env-name', nargs='?', default='Test', type=str,
                            help="Gym Environment name to load.")
         parser.add_argument('-ep', '--episodes', nargs='?', default=100, type=int,
@@ -81,9 +79,8 @@ class SessionManager:
         else:
             iteration = parent.iteration + 1
             
-        if self.agent_id is not None:
-            agent = self.db.query(Agent).get(self.agent_id)
-        elif parent is None:
+        # create or fetch the Agent
+        if parent is None:
             env = environment_parser(self.env_name)
             config = {}
             agent_instance = ActorCriticAgent(env)
@@ -93,7 +90,12 @@ class SessionManager:
             )
             self.db.add(agent)
         else:
-            agent = parent.agent
+            parent_agent = parent.agent(full=True)
+            agent = Agent(
+                config=json.dumps(parent_agent['config'], cls=NumpyEncoder),
+                weights=json.dumps(parent_agent['weights'], cls=NumpyEncoder)
+            )
+            self.db.add(agent)
             
         try:
             repo = Repo('./')
@@ -122,7 +124,7 @@ class SessionManager:
         
         # reconstitute the agent
         agent_config = json.loads(self.session.agent.config)
-        agent_weights = np.array(json.loads(self.session.agent.weights))
+        agent_weights = json.loads(self.session.agent.weights)
         agent = ActorCriticAgent(env=env, **agent_config)
         agent.model.set_weights(agent_weights)
         
@@ -136,7 +138,20 @@ class SessionManager:
             
             observations, actions, rewards, dones, infos = self.run(agent, env, episode)
             
-            self.session.average_reward = np.mean([ep.total_reward for ep in self.session.episodes])
+            episode.observations = json.dumps(observations, cls=NumpyEncoder)
+            episode.actions = json.dumps(actions, cls=NumpyEncoder)
+            episode.rewards = json.dumps(rewards, cls=NumpyEncoder)
+            episode.dones = json.dumps(dones, cls=NumpyEncoder)
+            episode.infos = json.dumps(infos, cls=NumpyEncoder)
+            
+            total_rewards = [ep.total_reward for ep in self.session.episodes]
+            self.session.reward_mean = np.mean(total_rewards)
+            self.session.reward_median = np.median(total_rewards)
+            self.session.reward_max = np.max(total_rewards)
+            self.session.reward_min = np.min(total_rewards)
+            self.session.reward_std = np.std(total_rewards)
+            
+            episode.updated_at = datetime.datetime.utcnow()
             self.session.updated_at = datetime.datetime.utcnow()
             self.db.commit()
 
@@ -152,6 +167,7 @@ class SessionManager:
                     "actions": [],
                     "discounted_rewards": []
                 }
+                self.session.agent.weights = json.dumps(agent.get_weights(), cls=NumpyEncoder)
                 
     def run(self, agent, env, episode):
         obs = env.reset()
@@ -175,19 +191,6 @@ class SessionManager:
             rewards.append(reward)
             dones.append(done)
             infos.append(info)
-            
-            step = Step(
-                iteration=step_iteration,
-                episode=episode,
-                observation=json.dumps(obs, cls=NumpyEncoder),
-                action=json.dumps(action, cls=NumpyEncoder),
-                reward=reward,
-                done=done,
-                info=json.dumps(info, cls=NumpyEncoder)
-            )
-            episode.total_reward += reward
-            self.db.add(step)
-            self.db.commit()
                 
             if done:
                 return observations, actions, rewards, dones, infos
@@ -236,6 +239,8 @@ class Session(Base):
     children = relationship("Session", backref=backref('parent', remote_side=[id]))
     parent_id = Column(Integer, ForeignKey('sessions.id'))
     
+    episodes = relationship("Episode", backref="session")
+    
     agent_id = Column(Integer, ForeignKey('agents.id'))
     agent = relationship("Agent", backref="agent")
     
@@ -246,7 +251,11 @@ class Session(Base):
     git_url = Column(String)
     episode_iterations = Column(Integer)
     
-    average_reward = Column(Float)
+    reward_mean = Column(Float)
+    reward_median = Column(Float)
+    reward_std = Column(Float)
+    reward_max = Column(Float)
+    reward_min = Column(Float)
 
     created_at = Column(DateTime, default=datetime.datetime.utcnow)
     updated_at = Column(DateTime)
@@ -266,7 +275,11 @@ class Session(Base):
             "env_name": self.env_name,
             "commit": self.commit,
             "git_url": self.git_url,
-            "average_reward": self.average_reward,
+            "reward_mean": self.reward_mean,
+            "reward_median": self.reward_median,
+            "reward_std": self.reward_std,
+            "reward_max": self.reward_max,
+            "reward_min": self.reward_min,
             "episode_iterations": self.episode_iterations,
             "save": self.save,
             "created_at": str(self.created_at),
@@ -279,10 +292,16 @@ class Episode(Base):
 
     id = Column(Integer, primary_key=True)
     session_id = Column(Integer, ForeignKey('sessions.id'))
-    session = relationship("Session", backref="episodes")
     iteration = Column(Integer)
     save = Column(Boolean, default=False)
     total_reward = Column(Float)
+    
+    observations = Column(JSON)
+    actions = Column(JSON)
+    rewards = Column(JSON)
+    dones = Column(JSON)
+    infos = Column(JSON)
+    
     created_at = Column(DateTime, default=datetime.datetime.utcnow)
     updated_at = Column(DateTime)
 
@@ -306,49 +325,49 @@ class Episode(Base):
             "updated_at": str(self.updated_at)
         }
     
-class Step(Base):
-    __tablename__ = 'steps'
+# class Step(Base):
+#     __tablename__ = 'steps'
 
-    id = Column(Integer, primary_key=True)
-    iteration = Column(Integer)
-    save = Column(Boolean, default=False)
+#     id = Column(Integer, primary_key=True)
+#     iteration = Column(Integer)
+#     save = Column(Boolean, default=False)
     
-    episode_id = Column(Integer, ForeignKey('episodes.id'))
-    episode = relationship("Episode", backref="steps")
+#     episode_id = Column(Integer, ForeignKey('episodes.id'))
+#     episode = relationship("Episode", backref="steps")
     
-    observation = Column(JSON)
-    action = Column(JSON)
-    reward = Column(Float)
-    done = Column(Boolean)
-    info = Column(JSON)
-    created_at = Column(DateTime, default=datetime.datetime.utcnow)
+#     observation = Column(JSON)
+#     action = Column(JSON)
+#     reward = Column(Float)
+#     done = Column(Boolean)
+#     info = Column(JSON)
+#     created_at = Column(DateTime, default=datetime.datetime.utcnow)
 
-    def __repr__(self):
-        return f"Step {self.id}: {self.iteration}"
+#     def __repr__(self):
+#         return f"Step {self.id}: {self.iteration}"
     
-    def __str__(self):
-        return f"Step {self.id}: {self.iteration}"
+#     def __str__(self):
+#         return f"Step {self.id}: {self.iteration}"
     
-    def __call__(self, *args, **kargs):
-        data = {
-            "id": self.id,
-            "iteration": self.iteration,
-            "episode_id": self.episode_id,
-            "action": json.loads(self.action),
-            "reward": self.reward,
-            "done": self.done,
-            "info": json.loads(self.info),
-            "save": self.save,
-            "created_at": str(self.created_at)
-        }
+#     def __call__(self, *args, **kargs):
+#         data = {
+#             "id": self.id,
+#             "iteration": self.iteration,
+#             "episode_id": self.episode_id,
+#             "action": json.loads(self.action),
+#             "reward": self.reward,
+#             "done": self.done,
+#             "info": json.loads(self.info),
+#             "save": self.save,
+#             "created_at": str(self.created_at)
+#         }
         
-        try:
-            if kargs['full']:
-                data["observation"] = json.loads(self.observation)
-        except:
-            pass
+#         try:
+#             if kargs['full']:
+#                 data["observation"] = json.loads(self.observation)
+#         except:
+#             pass
         
-        return data
+#         return data
         
 class NumpyEncoder(json.JSONEncoder):
     def default(self, obj):
