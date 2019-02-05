@@ -118,8 +118,8 @@ class SessionManager:
         session = Session(parent=parent, agent=agent, env_name=self.env_name, iteration=iteration,
                                episode_iterations=self.episodes, commit=commit, git_url=git_url)
         self.db.add(session)
-        self.session_id = session.id
         self.db.commit()
+        self.session_id = session.id
         self.disconnect_from_database()
         
     def train(self):
