@@ -9,6 +9,8 @@ app = Flask(__name__)
 api = Api(app)
 
 parser = reqparse.RequestParser()
+parser.add_argument('step_size', type=int)
+parser.add_argument('iter', type=int)
 parser.add_argument('from', type=int)
 parser.add_argument('to', type=int)
 parser.add_argument('page', type=int)
@@ -50,16 +52,24 @@ class EntityController(Resource):
         args = parser.parse_args()
         _from = args['from']
         _to = args['to']
+        _iter = args['iter']
+        _step = args['step_size']
         page, per_page = parse_pagination(args)
         
+        print("Connecting")
         self.sm.connect_to_database()
         if entity_id is None:
             entity = entity_map[entity]
             entities_query = self.sm.db.query(entity)
+            
             if _to is not None:
                 entities_query = entities_query.filter(entity.iteration <= _to)
             if _from is not None:
                 entities_query = entities_query.filter(entity.iteration >= _from)
+            if _iter is not None:
+                entities_query = entities_query.filter(entity.iteration == _iter)
+            if _step is not None:
+                entities_query = entities_query.filter(entity.id % _step == 0)
                 
             entities = entities_query.order_by(entity.id).offset(per_page * (page - 1)).limit(per_page).all()
             count = get_count(entities_query)
@@ -80,9 +90,16 @@ class EntityController(Resource):
             return_data = { "data" : [e() for e in subentities], "page":  page, "per_page": per_page, "count": count}
         else:
             entity = entity_map[entity]
-            data = self.sm.db.query(entity).get(entity_id)()
+            if int(entity_id) == -1:
+                data = self.sm.db.query(entity).order_by(desc(entity.iteration)).first()()
+            elif int(entity_id) == 0:
+                data = self.sm.db.query(entity).order_by(asc(entity.iteration)).first()()
+            else:
+                data = self.sm.db.query(entity).get(entity_id)()
             return_data = { "data" : data }
         
+        print("Disconnecting")
+        self.sm.db.commit()
         self.sm.disconnect_from_database()
         return return_data
 

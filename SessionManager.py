@@ -15,36 +15,35 @@ config = tf.ConfigProto()
 config.gpu_options.allow_growth = True
 tf.enable_eager_execution(config=config)
 
+from Agent import ActorCriticAgent
+
 import sqlalchemy as db
+from sqlalchemy.pool import NullPool
 from sqlalchemy.orm import sessionmaker, relationship, backref
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.sql.expression import func
 from sqlalchemy import Column, Integer, String, DateTime, Float, Boolean, LargeBinary, JSON, ForeignKey, desc
 
 Base = declarative_base()
-
-from Agent import ActorCriticAgent
+load_dotenv()
+database_url = os.getenv('DATABASE_URL')
+engine = db.create_engine(database_url, pool_pre_ping=True, poolclass=NullPool)
+DBSession = sessionmaker(bind=engine)
 
 class SessionManager:
     def __init__(self, *args, **kargs):
-        load_dotenv()
-        self.database_url = os.getenv('DATABASE_URL')
-        self.engine = db.create_engine(self.database_url, pool_pre_ping=True)
-        self.connection = self.engine.connect()
-        self.configured = False
-        
         self.SessionClass = Session
         self.EpisodeClass = Episode
         self.AgentClass = Agent
         
     def connect_to_database(self):
-        self.DBSession = sessionmaker(bind=self.engine)
-        self.db = self.DBSession()
-        Base.metadata.create_all(self.engine)
+        self.connection = engine.connect()
+        self.db = DBSession()
         
     def disconnect_from_database(self):
         self.db.commit()
         self.db.close()
+        self.connection.close()
         
     def configure(self, arg_list=[]):
         parser = argparse.ArgumentParser(
@@ -85,7 +84,7 @@ class SessionManager:
             parent = self._get_session_from_rule()
             
         if parent is None:
-            iteration = 0
+            iteration = 1
         else:
             iteration = parent.iteration + 1
             
@@ -126,13 +125,6 @@ class SessionManager:
         print("Training...")
         self.connect_to_database()
         session = self.db.query(Session).get(self.session_id)
-        # get the last episode
-        last_episode = self.db.query(Episode).filter(
-            Episode.session == session).order_by(Episode.id.desc()).first()
-        if last_episode is None:
-            start_episode = 0
-        else:
-            start_episode = last_episode.iteration + 1
             
         # setup the environment
         env = environment_parser(self.env_name)
@@ -149,8 +141,8 @@ class SessionManager:
             "discounted_rewards": []
         }
         
-        episode_iteration = start_episode
-        while episode_iteration < start_episode + session.episode_iterations and len(batch['observations']) > 0:
+        episode_iteration = 1
+        while episode_iteration <= session.episode_iterations or len(batch['observations']) > 0:
             episode = Episode(session=session, iteration=episode_iteration, total_reward=0)
             
             observations, actions, rewards, dones, infos = self.run(agent, env, episode)
@@ -398,3 +390,7 @@ class TestingEnvironment:
             
         return np.array([np.random.normal(loc=self.mean)]), reward, done, {}
         
+if __name__ == "__main__":
+    connection = engine.connect()
+    Base.metadata.create_all(engine)
+    connection.close()
