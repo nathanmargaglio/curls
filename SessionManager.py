@@ -31,16 +31,20 @@ class SessionManager:
         self.database_url = os.getenv('DATABASE_URL')
         self.engine = db.create_engine(self.database_url, pool_pre_ping=True)
         self.connection = self.engine.connect()
-        self.DBSession = sessionmaker(bind=self.engine)
-        self.db = self.DBSession()
         self.configured = False
         
         self.SessionClass = Session
         self.EpisodeClass = Episode
-        self.StepClass = Step
         self.AgentClass = Agent
         
+    def connect_to_database(self):
+        self.DBSession = sessionmaker(bind=self.engine)
+        self.db = self.DBSession()
         Base.metadata.create_all(self.engine)
+        
+    def disconnect_from_database(self):
+        self.db.commit()
+        self.db.close()
         
     def configure(self, arg_list=[]):
         parser = argparse.ArgumentParser(
@@ -48,7 +52,7 @@ class SessionManager:
         
         parser.add_argument('-p', '--parent', nargs='?', default=None, type=int,
                            help="Which parent Session to branch from.")
-        parser.add_argument('-r', '--rule', nargs='?', default='max-reward', type=str,
+        parser.add_argument('-r', '--rule', nargs='?', default='reward-max', type=str,
                            help="Which Session to branch from upon finishing.")
         parser.add_argument('-e', '--env-name', nargs='?', default='Test', type=str,
                            help="Gym Environment name to load.")
@@ -58,21 +62,27 @@ class SessionManager:
         parser.parse_args(arg_list, namespace=self)
         self.configured = True
         
-    def _get_parent_from_rule(self):
-        if self.rule == 'max-reward':
-            print(f"_get_parent_from_rule: {self.rule}")
-            parent = self.db.query(Session).filter(
-                Session.average_reward != None).order_by(
-                desc(Session.average_reward)).limit(1).first()
-            return parent
+    def _get_session_from_rule(self):
+        print(f"_get_parent_from_rule: {self.rule}")
+        if self.rule == 'reward-max':
+            query = self.db.query(Session).filter(
+                Session.reward_mean != None).order_by(
+                desc(Session.reward_mean)).all()
+            
+            for session in query:
+                if len(session.children) < 3:
+                    return session
+            return None
         else:
             raise NameError(f"Rule {self.rule} is not defined.")
         
     def initialize_session(self):
+        self.connect_to_database()
+        
         if self.parent is not None:
             parent = self.db.query(Session).get(self.parent)
         else:
-            parent = self._get_parent_from_rule()
+            parent = self._get_session_from_rule()
             
         if parent is None:
             iteration = 0
@@ -105,15 +115,20 @@ class SessionManager:
             git_url = None
             commit = None
             
-        self.session = Session(parent=parent, agent=agent, env_name=self.env_name, iteration=iteration,
+        session = Session(parent=parent, agent=agent, env_name=self.env_name, iteration=iteration,
                                episode_iterations=self.episodes, commit=commit, git_url=git_url)
-        self.db.add(self.session)
+        self.db.add(session)
+        self.session_id = session.id
         self.db.commit()
+        self.disconnect_from_database()
         
     def train(self):
+        print("Training...")
+        self.connect_to_database()
+        session = self.db.query(Session).get(self.session_id)
         # get the last episode
         last_episode = self.db.query(Episode).filter(
-            Episode.session == self.session).order_by(Episode.id.desc()).first()
+            Episode.session == session).order_by(Episode.id.desc()).first()
         if last_episode is None:
             start_episode = 0
         else:
@@ -123,8 +138,8 @@ class SessionManager:
         env = environment_parser(self.env_name)
         
         # reconstitute the agent
-        agent_config = json.loads(self.session.agent.config)
-        agent_weights = json.loads(self.session.agent.weights)
+        agent_config = json.loads(session.agent.config)
+        agent_weights = json.loads(session.agent.weights)
         agent = ActorCriticAgent(env=env, **agent_config)
         agent.model.set_weights(agent_weights)
         
@@ -133,8 +148,10 @@ class SessionManager:
             "actions": [],
             "discounted_rewards": []
         }
-        for episode_iteration in range(start_episode, start_episode + self.session.episode_iterations):
-            episode = Episode(session=self.session, iteration=episode_iteration, total_reward=0)
+        
+        episode_iteration = start_episode
+        while episode_iteration < start_episode + session.episode_iterations and len(batch['observations']) > 0:
+            episode = Episode(session=session, iteration=episode_iteration, total_reward=0)
             
             observations, actions, rewards, dones, infos = self.run(agent, env, episode)
             
@@ -143,21 +160,22 @@ class SessionManager:
             episode.rewards = json.dumps(rewards, cls=NumpyEncoder)
             episode.dones = json.dumps(dones, cls=NumpyEncoder)
             episode.infos = json.dumps(infos, cls=NumpyEncoder)
+            episode.total_reward = float(np.sum(rewards))
             
-            total_rewards = [ep.total_reward for ep in self.session.episodes]
-            self.session.reward_mean = np.mean(total_rewards)
-            self.session.reward_median = np.median(total_rewards)
-            self.session.reward_max = np.max(total_rewards)
-            self.session.reward_min = np.min(total_rewards)
-            self.session.reward_std = np.std(total_rewards)
+            total_rewards = [ep.total_reward for ep in session.episodes]
+            session.reward_mean = float(np.mean(total_rewards))
+            session.reward_median = float(np.median(total_rewards))
+            session.reward_max = float(np.max(total_rewards))
+            session.reward_min = float(np.min(total_rewards))
+            session.reward_std = float(np.std(total_rewards))
             
             episode.updated_at = datetime.datetime.utcnow()
-            self.session.updated_at = datetime.datetime.utcnow()
-            self.db.commit()
+            session.updated_at = datetime.datetime.utcnow()
 
             batch['observations'] += observations
             batch['actions'] += actions
             batch['discounted_rewards'] += get_discounted_rewards(rewards, agent.gamma)
+            episode_iteration += 1
 
             if len(batch['observations']) >= agent.batch_size:
                 for epoch in range(agent.epochs):
@@ -167,7 +185,13 @@ class SessionManager:
                     "actions": [],
                     "discounted_rewards": []
                 }
-                self.session.agent.weights = json.dumps(agent.get_weights(), cls=NumpyEncoder)
+                session.agent.weights = json.dumps(agent.model.get_weights(), cls=NumpyEncoder)
+                trained_once = True
+                
+            self.db.commit()
+                
+        self.db.commit()
+        self.disconnect_from_database()
                 
     def run(self, agent, env, episode):
         obs = env.reset()
@@ -324,50 +348,6 @@ class Episode(Base):
             "created_at": str(self.created_at),
             "updated_at": str(self.updated_at)
         }
-    
-# class Step(Base):
-#     __tablename__ = 'steps'
-
-#     id = Column(Integer, primary_key=True)
-#     iteration = Column(Integer)
-#     save = Column(Boolean, default=False)
-    
-#     episode_id = Column(Integer, ForeignKey('episodes.id'))
-#     episode = relationship("Episode", backref="steps")
-    
-#     observation = Column(JSON)
-#     action = Column(JSON)
-#     reward = Column(Float)
-#     done = Column(Boolean)
-#     info = Column(JSON)
-#     created_at = Column(DateTime, default=datetime.datetime.utcnow)
-
-#     def __repr__(self):
-#         return f"Step {self.id}: {self.iteration}"
-    
-#     def __str__(self):
-#         return f"Step {self.id}: {self.iteration}"
-    
-#     def __call__(self, *args, **kargs):
-#         data = {
-#             "id": self.id,
-#             "iteration": self.iteration,
-#             "episode_id": self.episode_id,
-#             "action": json.loads(self.action),
-#             "reward": self.reward,
-#             "done": self.done,
-#             "info": json.loads(self.info),
-#             "save": self.save,
-#             "created_at": str(self.created_at)
-#         }
-        
-#         try:
-#             if kargs['full']:
-#                 data["observation"] = json.loads(self.observation)
-#         except:
-#             pass
-        
-#         return data
         
 class NumpyEncoder(json.JSONEncoder):
     def default(self, obj):

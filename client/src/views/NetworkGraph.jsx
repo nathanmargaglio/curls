@@ -36,11 +36,11 @@ export class NetworkGraph extends React.Component<{}, Graph> {
         let imin = 0
         for (let i = 0; i < res.data.data.length; i++) {
             const d = res.data.data[i]
-            if (d.average_reward !== null && d.average_reward > rmax) {
-                rmax = d.average_reward
+            if (d.reward_mean !== null && d.reward_mean > rmax) {
+                rmax = d.reward_mean
             }
-            if (d.average_reward !== null && d.average_reward < rmin) {
-                rmin = d.average_reward
+            if (d.reward_mean !== null && d.reward_mean < rmin) {
+                rmin = d.reward_mean
             }
             if (d.iteration > imax) {
                 imax = d.iteration
@@ -53,14 +53,14 @@ export class NetworkGraph extends React.Component<{}, Graph> {
         imax = imax - imin
         for (let i = 0; i < res.data.data.length; i++) {
           const d = res.data.data[i]
-          if (d.average_reward === null){
+          if (d.reward_mean === null){
               continue
           }
           const node = {
               id: d.id,
-              label: `${d.average_reward}`,
+              label: `${d.id} (${d.reward_mean})`,
               x: (d.iteration - imin)/imax,
-              y: -(d.average_reward - rmin)/rmax,
+              y: -(d.reward_mean - rmin)/rmax,
               color: '#00e3b4'
           }
           graph.nodes.push(node)

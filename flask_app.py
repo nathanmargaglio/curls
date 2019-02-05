@@ -2,7 +2,7 @@ from flask import Flask
 from flask_restful import reqparse, abort, Api, Resource
 from pprint import pprint
 import numpy as np
-from SessionManager import SessionManager, Session, Episode, Step, Agent
+from SessionManager import SessionManager, Session, Episode, Agent
 from sqlalchemy import desc, asc, func
 
 app = Flask(__name__)
@@ -17,7 +17,6 @@ parser.add_argument('per_page', type=int)
 entity_map = {
     "sessions": Session,
     "episodes": Episode,
-    "steps": Step,
     "agents": Agent
 }
 
@@ -53,6 +52,7 @@ class EntityController(Resource):
         _to = args['to']
         page, per_page = parse_pagination(args)
         
+        self.sm.connect_to_database()
         if entity_id is None:
             entity = entity_map[entity]
             entities_query = self.sm.db.query(entity)
@@ -62,7 +62,8 @@ class EntityController(Resource):
                 entities_query = entities_query.filter(entity.iteration >= _from)
                 
             entities = entities_query.order_by(entity.id).offset(per_page * (page - 1)).limit(per_page).all()
-            return { "data" : [e() for e in entities], "page":  page, "per_page": per_page, "count": get_count(entities_query)}
+            count = get_count(entities_query)
+            return_data = { "data" : [e() for e in entities], "page":  page, "per_page": per_page, "count": count}
         elif subentity is not None:
             subentities_query = self.generate_subquery(entity, entity_id, subentity)
 
@@ -75,10 +76,15 @@ class EntityController(Resource):
                 subentities_query = subentities_query.filter(subentity.iteration >= _from)
                 
             subentities = subentities_query.order_by(subentity.id).offset(per_page * (page - 1)).limit(per_page).all()
-            return { "data" : [e() for e in subentities], "page":  page, "per_page": per_page, "count": get_count(subentities_query)}
+            count = get_count(subentities_query)
+            return_data = { "data" : [e() for e in subentities], "page":  page, "per_page": per_page, "count": count}
         else:
             entity = entity_map[entity]
-            return { "data" : self.sm.db.query(entity).get(entity_id)() }
+            data = self.sm.db.query(entity).get(entity_id)()
+            return_data = { "data" : data }
+        
+        self.sm.disconnect_from_database()
+        return return_data
 
     def generate_subquery(self, entity, entity_id, subentity):
         if entity == 'sessions':
@@ -90,10 +96,6 @@ class EntityController(Resource):
                 entity = entity_map[entity]
                 entity = self.sm.db.query(entity).get(entity_id)()
                 return self.sm.db.query(subentity).filter(subentity.id == entity['agent_id'])
-        if entity == 'episodes':
-            if subentity == 'steps':
-                subentity = entity_map[subentity]
-                return self.sm.db.query(subentity).filter(subentity.episode_id == entity_id)
             
         abort(400, message="Query not yet supported.")
         
