@@ -135,7 +135,8 @@ export class NetworkGraph extends React.Component<{}, Graph> {
   }
 
   componentDidMount() {
-    this.updateSessionsGraph()
+    //this.updateSessionsGraph()
+    this.updateSessionsGraphFull()
   }
 
   render() {
@@ -160,9 +161,11 @@ export class NetworkGraph extends React.Component<{}, Graph> {
           <Sigma
             renderer="canvas"
             style={{width: '100%', height: '400px'}}
+            onClickNode={(n) => { this.props.nodeSetter(n.data.node.id) }}
             settings={{
               drawLabels: false,
-              clone: false
+              clone: false,
+              mouseWheelEnabled: false
             }}
             graph={this.state}
           >

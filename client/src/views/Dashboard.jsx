@@ -5,6 +5,7 @@ import classNames from "classnames";
 import { Line, Bar } from "react-chartjs-2";
 
 import {NetworkGraph} from './NetworkGraph'
+import {EpisodePlot} from './EpisodePlot'
 import axios from 'axios';
 
 // reactstrap components
@@ -40,7 +41,8 @@ class Dashboard extends React.Component {
   constructor(props) {
     super(props);
     this.state = {
-      bigChartData: "data1"
+      bigChartData: "data1",
+      activeNode: null
     };
   }
 
@@ -49,13 +51,17 @@ class Dashboard extends React.Component {
       bigChartData: name
     });
   };
+
+  setActiveNode = node => {
+    this.setState({
+      activeNode: node
+    })
+  }
   
   render() {
     return (
       <>
         <div className="content">
-          
-          
           <Row>
             <Col xs="12">
               <Card className="card-chart" style={{maxWidth: 'inherit', height: '600px'}}>
@@ -63,7 +69,7 @@ class Dashboard extends React.Component {
                   <Row>
                     <Col className="text-left" sm="6">
                       <h5 className="card-category">Sessions {this.state.count}</h5>
-                      <CardTitle tag="h2">Sessions</CardTitle>
+                      <CardTitle tag="h2">Average Reward per Session</CardTitle>
                     </Col>
                     <Col sm="6">
                       <ButtonGroup
@@ -91,13 +97,14 @@ class Dashboard extends React.Component {
                 </CardHeader>
                 <CardBody>
                   <div className="chart-area">
-                    <NetworkGraph />
+                    <NetworkGraph nodeSetter={this.setActiveNode} />
                   </div>
                 </CardBody>
               </Card>
             </Col>
           </Row>
           
+          <EpisodePlot activeNode={this.state.activeNode} />
           
           <Row>
             <Col xs="12">
