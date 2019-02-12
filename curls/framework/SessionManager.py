@@ -15,7 +15,7 @@ config = tf.ConfigProto()
 config.gpu_options.allow_growth = True
 tf.enable_eager_execution(config=config)
 
-from Agent import ActorCriticAgent
+from .Agent import ActorCriticAgent
 
 import sqlalchemy as db
 from sqlalchemy.pool import NullPool
