@@ -1,3 +1,6 @@
 .ipynb_checkpoints
 __pycache__
 runs
+dist
+curls.egg-info
+build
