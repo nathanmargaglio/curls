@@ -4,3 +4,4 @@ runs
 dist
 curls.egg-info
 build
+.env
