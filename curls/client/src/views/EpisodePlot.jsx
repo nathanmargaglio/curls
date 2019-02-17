@@ -123,7 +123,7 @@ export class EpisodePlot extends React.Component {
   }
   
   updateData = async () => {
-    let res = await axios.get('http://app.margagl.io/api/sessions/' + String(this.props.activeNode) + '/episodes')
+    let res = await axios.get('http://curls.margagl.io/api/sessions/' + String(this.props.activeNode) + '/episodes')
     console.log(res)
     let data = []
     let labels = []

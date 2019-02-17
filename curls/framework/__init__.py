@@ -1,2 +1,2 @@
-from .SessionManager import SessionManager
+from .SessionManager import *
 from .Agent import *

@@ -24,7 +24,7 @@ export class NetworkGraph extends React.Component<{}, Graph> {
       nodes: [],
       edges: []
     })
-    axios.get('http://app.margagl.io/api/sessions')
+    axios.get('https://curls.margagl.io/api/sessions')
       .then(res => {
         let graph = {
           nodes: [],

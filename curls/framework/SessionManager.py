@@ -15,7 +15,7 @@ config = tf.ConfigProto()
 config.gpu_options.allow_growth = True
 tf.enable_eager_execution(config=config)
 
-from .Agent import ActorCriticAgent
+from Agent import ActorCriticAgent
 
 import sqlalchemy as db
 from sqlalchemy.pool import NullPool
@@ -31,10 +31,11 @@ engine = db.create_engine(database_url, pool_pre_ping=True, poolclass=NullPool)
 DBSession = sessionmaker(bind=engine)
 
 class SessionManager:
-    def __init__(self, *args, **kargs):
+    def __init__(self, *args, **kwargs):
         self.SessionClass = Session
         self.EpisodeClass = Episode
         self.AgentClass = Agent
+        self.configure(**kwargs)
         
     def connect_to_database(self):
         self.connection = engine.connect()
@@ -45,20 +46,9 @@ class SessionManager:
         self.db.close()
         self.connection.close()
         
-    def configure(self, arg_list=[]):
-        parser = argparse.ArgumentParser(
-            description='Session Manager.')
-        
-        parser.add_argument('-p', '--parent', nargs='?', default=None, type=int,
-                           help="Which parent Session to branch from.")
-        parser.add_argument('-r', '--rule', nargs='?', default='reward-max', type=str,
-                           help="Which Session to branch from upon finishing.")
-        parser.add_argument('-e', '--env-name', nargs='?', default='Test', type=str,
-                           help="Gym Environment name to load.")
-        parser.add_argument('-ep', '--episodes', nargs='?', default=100, type=int,
-                           help="Number of episodes to run.")
-        
-        parser.parse_args(arg_list, namespace=self)
+    def configure(self, *args, **kwargs):
+        allowed_keys = ['parent', 'rule', 'env_name', 'episodes']
+        self.__dict__.update((k, v) for k, v in kwargs.items() if k in allowed_keys)
         self.configured = True
         
     def _get_session_from_rule(self):
@@ -145,7 +135,7 @@ class SessionManager:
         while episode_iteration <= session.episode_iterations or len(batch['observations']) > 0:
             episode = Episode(session=session, iteration=episode_iteration, total_reward=0)
             
-            observations, actions, rewards, dones, infos = self.run(agent, env, episode)
+            observations, actions, rewards, dones, infos = self.run(agent, env)
             
             episode.observations = json.dumps(observations, cls=NumpyEncoder)
             episode.actions = json.dumps(actions, cls=NumpyEncoder)
@@ -185,7 +175,7 @@ class SessionManager:
         self.db.commit()
         self.disconnect_from_database()
                 
-    def run(self, agent, env, episode):
+    def run(self, agent, env):
         obs = env.reset()
         done = False
         rewards = []
@@ -391,6 +381,33 @@ class TestingEnvironment:
         return np.array([np.random.normal(loc=self.mean)]), reward, done, {}
         
 if __name__ == "__main__":
-    connection = engine.connect()
-    Base.metadata.create_all(engine)
-    connection.close()
+    parser = argparse.ArgumentParser(description='Manage Reinforcement Learning Sessions.')
+
+    parser.add_argument('-ca', '--create-all', nargs='?', default=False, type=bool,
+                       help="Create tables if they don't exist.")
+    parser.add_argument('-t', '--train', nargs='?', default=False, type=bool,
+                       help="Train the agent immediately.")
+    parser.add_argument('-p', '--parent', nargs='?', default=None, type=int,
+                       help="Which parent Session to branch from.")
+    parser.add_argument('-r', '--rule', nargs='?', default='reward-max', type=str,
+                       help="Which Session to branch from upon finishing.")
+    parser.add_argument('-e', '--env-name', nargs='?', default='Test', type=str,
+                       help="Gym Environment name to load.")
+    parser.add_argument('-ep', '--episodes', nargs='?', default=100, type=int,
+                       help="Number of episodes to run.")
+    parser.add_argument('-s', '--sessions', nargs='?', default=1, type=int,
+                       help="Number of sessions to run.")
+        
+    args = parser.parse_args().__dict__
+    sm = SessionManager()
+    sm.configure(**args)
+    
+    if args['create_all']:
+        connection = engine.connect()
+        Base.metadata.create_all(engine)
+        connection.close()
+        
+    if args['train']:
+        for i in range(args['sessions']):
+            sm.initialize_session()
+            sm.train()
